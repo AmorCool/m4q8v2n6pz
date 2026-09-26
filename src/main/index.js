@@ -159,6 +159,24 @@ function buildNumberOf(versionString) {
     return parts.length ? parts[parts.length - 1] : "";
 }
 
+/*
+ * Whether a path is worth trying to execute.
+ *
+ * `fs.constants.X_OK` is checked but is not the whole story: Windows has no
+ * executable bit, so the call degenerates to an existence test there and would
+ * happily accept a directory. The stat is what rules that out.
+ */
+function isRunnableFile(candidate) {
+    if (!candidate) return false;
+    try {
+        if (!fs.statSync(candidate).isFile()) return false;
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return true;
+    } catch (err) {
+        return false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Application
 // ---------------------------------------------------------------------------
@@ -364,12 +382,9 @@ class Application extends EventEmitter {
 
         let binary = "";
         for (const candidate of candidates) {
-            try {
-                fs.accessSync(candidate, fs.constants.X_OK);
+            if (isRunnableFile(candidate)) {
                 binary = candidate;
                 break;
-            } catch (err) {
-                // Not there or not executable; try the next.
             }
         }
 

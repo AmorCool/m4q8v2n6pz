@@ -256,18 +256,48 @@ class ThunderKernel extends EventEmitter {
  * Placeholder engine.
  *
  * It accepts everything and does nothing, which lets the shell boot and be
- * exercised before a real engine exists. Returning a valid task id matters:
- * callers store it and would misbehave on undefined.
+ * exercised before a real engine exists.
+ *
+ * Two details are load bearing rather than decorative:
+ *
+ *   - `addTask` returns a valid id. Callers store it and would misbehave on
+ *     undefined.
+ *   - `addTask` emits `task-inserted`. Without the event the kernel never
+ *     learns the task exists outside its own map, and a UI receives nothing at
+ *     all -- which looks like a broken event pipeline rather than like a
+ *     missing engine. A stub that is silent is worse than no stub, because it
+ *     hides the difference.
  */
 function createNullEngine() {
     const emitter = new EventEmitter();
     let counter = 0;
+
     return Object.assign(emitter, {
-        addTask() {
+        addTask(spec) {
             counter += 1;
-            return `stub-${counter}`;
+            const taskId = `stub-${counter}`;
+            // Emitted on the next tick for the same reason a real engine would:
+            // the caller has not received its task id yet on this tick, and a
+            // synchronous event would reach listeners that cannot key it.
+            setImmediate(() => {
+                emitter.emit("task-inserted", {
+                    taskId,
+                    status: TASK_STATUS.QUEUED,
+                    url: (spec && spec.url) || "",
+                    taskType: spec && spec.torrentPath ? 2 : 1,
+                    totalSize: 0,
+                    completedSize: 0,
+                    progress: 0,
+                    downloadSpeed: 0,
+                    bAcclerating: false,
+                    dcdnFileIndex: -1,
+                });
+            });
+            return taskId;
         },
-        removeTask() {},
+        removeTask(taskId) {
+            setImmediate(() => emitter.emit("task-removed", { taskId }));
+        },
         start() {},
         pause() {},
         setUserInfo() {},

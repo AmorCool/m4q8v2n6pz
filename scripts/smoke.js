@@ -15,6 +15,8 @@
 
 const assert = require("assert");
 const path = require("path");
+const fs = require("fs");
+const os = require("os");
 
 const contract = require("../src/main/contract");
 const vipToken = require("../src/main/vip-token");
@@ -865,6 +867,67 @@ console.log("\nboot");
         const taskId = app.kernel.addTask({ url: "http://x/1" });
         assert.ok(taskId, "the stub engine must still hand out a task id");
         await app.stop();
+    });
+
+    await testAsync("a task event reaches a renderer listener", async () => {
+        const app = await createApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+
+        // The full path, end to end: engine emits, the kernel re-emits under
+        // the client's event name, and a renderer listening for that name
+        // receives it. A stub engine that stayed silent would leave this broken
+        // with nothing to point at.
+        const received = [];
+        app.mesh.renderer.attachServerEvent("OnTaskInserted", (payload) => {
+            received.push(payload);
+        });
+
+        const taskId = app.kernel.addTask({ url: "http://example.com/f.bin" });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        assert.strictEqual(received.length, 1, "the renderer must receive one event");
+        assert.strictEqual(received[0].taskId, taskId);
+        assert.strictEqual(received[0].url, "http://example.com/f.bin");
+        assert.strictEqual(received[0].bAcclerating, false);
+        await app.stop();
+    });
+
+    await testAsync("a task event also reaches the kernel's own map", async () => {
+        const app = await createApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+        const taskId = app.kernel.addTask({ url: "http://example.com/f.bin" });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        // The kernel keeps its own record so the UI can read synchronously.
+        const task = app.kernel.getTask(taskId);
+        assert.ok(task, "the kernel must have recorded the task");
+        assert.strictEqual(task.url, "http://example.com/f.bin");
+        await app.stop();
+    });
+
+    test("a configured engine path is only accepted if it is a file", async () => {
+        // Windows has no executable bit, so an existence check alone would
+        // accept a directory and the engine would fail to spawn much later.
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "thunderx-probe-"));
+        try {
+            const app = await createApplication({
+                config: {
+                    appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                    aria2Path: dir,
+                },
+            });
+            assert.strictEqual(app.engine, undefined, "a directory must not be taken for the binary");
+            await app.stop();
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);

@@ -93,6 +93,42 @@ client.registerFunctions({ SetTrayImage: (e, ...a) => {...}, FlashTray: (...) =>
 ⇒ `callServerFunction(<模块>, <方法>, ...参数)` 的第一个参数是**服务名**，
 是字符串拼接而非枚举 —— 复刻时要注意大小写完全一致（如 `Log` 大写、`SetPluginStatus` 驼峰）。
 
+### 3.1 ★ 纠正确认（第二轮实测，2026-09-26）
+
+上面「第一个参数是服务名」的说法**不准确**。`plugin-boot.js` 里的真实实现是：
+
+```js
+// 来自 out/plugin-boot.js
+callServerFunction(e, ...t) {
+    let n = null, r = yield this.callServerFunctionEx(e, ...t);
+    return r && (n = r[0]), n;
+}
+callServerFunctionEx(e, ...t) {
+    return this.internalCallServerFunctionEx(this.client, e, ...t);
+}
+
+// 底层发送：{rid, method: e, args: t}
+s = (t, n) => { t ? (r([null, t])) : r([n, void 0]) };
+```
+
+⇒ 真实语义只有三条：
+
+1. **`e` 是「函数名」，不是「模块名」。** 没有二级分派、没有命名空间。
+   `callServerFunction("Log", "plugin-boot", "information", ...)` 是把
+   `"plugin-boot"` 当作 **args[0]** 传给一个名叫 `Log` 的注册函数。
+2. **`callServerFunction` 返回裸值**（内部取 `r[0]`）；**`callServerFunctionEx` 返回元组**。
+   翻过来写会把字符串 `"from-plugin"` 变成 `"f"` —— 这种错很安静，必须两种形态都实现。
+3. **元组约定确认**：底层回调 `t ? [null, t] : [n, undefined]`，
+   即失败给 `[null, errMessage]`、成功给 `[value, undefined]`。与 `callRemoteClientFunction` 一致。
+
+注册侧语义（同文件实测）：
+
+```js
+this.apis = Object.assign({}, this.apis, e);   // 合并，不是替换整个集合
+```
+
+⇒ 同名覆盖、其余保留。
+
 ## 4. Electron 原生通道常量表（`ThunderChannelList`）
 
 渲染进程直接 `ipcRenderer.send(f.ThunderChannelList.channelXXX)`，
