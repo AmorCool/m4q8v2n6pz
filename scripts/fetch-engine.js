@@ -31,7 +31,7 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const REPO = "AmorCool/aria2-cross";
+const REPO = "AmorCool/k7m3p9x2qv";
 const BIN_DIR = path.join(__dirname, "..", "bin");
 
 /*

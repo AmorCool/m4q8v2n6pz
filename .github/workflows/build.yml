@@ -36,7 +36,7 @@ jobs:
       # They skip with a stated reason when bin/ is empty, and bin/ is empty
       # here by default: the engine is built in another repository and the
       # token this workflow receives is scoped to this one. Set ENGINE_TOKEN to
-      # a token that can read AmorCool/aria2-cross and these tests run for real
+      # a token that can read AmorCool/k7m3p9x2qv and these tests run for real
       # -- which matters, because a stub answers to every name and hid six
       # defects in the engine at once.
       - name: Fetch the download engine
