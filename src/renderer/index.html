@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'">
+    <title>ThunderX</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!--
+        Layout mirrors the original: a sidebar of filter entries, a toolbar, and
+        the task table. The plugin views sit in a container of their own so that
+        mounting one cannot disturb the task list.
+    -->
+    <div id="app">
+        <aside id="sidebar">
+            <div class="brand">ThunderX</div>
+            <nav id="filters">
+                <button class="filter is-active" data-status="all">全部</button>
+                <button class="filter" data-status="active">正在下载</button>
+                <button class="filter" data-status="waiting">等待中</button>
+                <button class="filter" data-status="paused">已暂停</button>
+                <button class="filter" data-status="done">已完成</button>
+                <button class="filter" data-status="error">失败</button>
+            </nav>
+            <div id="account" class="account">
+                <span id="account-name">未登录</span>
+            </div>
+        </aside>
+
+        <main id="content">
+            <header id="toolbar">
+                <input id="url" type="text" placeholder="粘贴链接或磁力链接" spellcheck="false">
+                <button id="add">新建</button>
+                <button id="pause">暂停</button>
+                <button id="resume">开始</button>
+                <button id="remove">删除</button>
+            </header>
+
+            <div id="banner" class="banner is-hidden"></div>
+
+            <table id="tasks">
+                <thead>
+                    <tr>
+                        <th class="col-name">名称</th>
+                        <th class="col-size">大小</th>
+                        <th class="col-progress">进度</th>
+                        <th class="col-speed">速度</th>
+                        <th class="col-status">状态</th>
+                    </tr>
+                </thead>
+                <tbody id="tasks-body"></tbody>
+            </table>
+
+            <div id="empty" class="empty">还没有任务</div>
+
+            <!-- Plugin views. Hidden until a plugin asks for one. -->
+            <div id="views"></div>
+        </main>
+    </div>
+
+    <script src="index.js"></script>
+</body>
+</html>

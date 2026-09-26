@@ -1,0 +1,298 @@
+/*
+ * Dark shell, matching how the client is normally run.
+ *
+ * Colours are declared once as custom properties so the task row's status
+ * colours and the toolbar's focus ring cannot drift apart.
+ */
+
+:root {
+    --bg: #1b1b1f;
+    --panel: #232329;
+    --panel-2: #2b2b33;
+    --line: #35353f;
+    --text: #e8e8ee;
+    --text-dim: #9a9aa8;
+    --accent: #4f8cff;
+    --ok: #3fbf6f;
+    --err: #e5534b;
+    --row: 34px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    user-select: none;
+    overflow: hidden;
+}
+
+#app {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    height: 100%;
+}
+
+/* Sidebar ------------------------------------------------------------------ */
+
+#sidebar {
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.brand {
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+#filters {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 8px;
+    gap: 2px;
+    flex: 1;
+}
+
+.filter {
+    text-align: left;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+.filter:hover {
+    background: var(--panel-2);
+    color: var(--text);
+}
+
+.filter.is-active {
+    background: var(--panel-2);
+    color: var(--accent);
+}
+
+.account {
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Content ------------------------------------------------------------------ */
+
+#content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+
+#toolbar {
+    display: flex;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+}
+
+#url {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+    user-select: text;
+}
+
+#url:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+#toolbar button {
+    padding: 7px 14px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+#toolbar button:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+#toolbar button:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+#add {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.banner {
+    margin: 10px 12px 0;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--err);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--text);
+}
+
+.banner.is-hidden {
+    display: none;
+}
+
+/* Task table --------------------------------------------------------------- */
+
+#tasks {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+#tasks thead th {
+    position: sticky;
+    top: 0;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text-dim);
+    font-weight: 500;
+    text-align: left;
+}
+
+.col-name { width: 38%; }
+.col-size { width: 11%; }
+.col-progress { width: 22%; }
+.col-speed { width: 13%; }
+.col-status { width: 16%; }
+
+#tasks-body {
+    display: table-row-group;
+    overflow-y: auto;
+}
+
+#tasks-body tr {
+    height: var(--row);
+    cursor: default;
+}
+
+#tasks-body tr:hover {
+    background: var(--panel);
+}
+
+#tasks-body tr.is-selected {
+    background: var(--panel-2);
+}
+
+#tasks-body td {
+    padding: 0 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cell-name {
+    color: var(--text);
+}
+
+/*
+ * The bar is a background gradient rather than a nested element, so a row
+ * stays a single line of text and long names cannot push the table around.
+ */
+.cell-progress {
+    position: relative;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.cell-progress .bar {
+    position: absolute;
+    inset: 6px 12px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    overflow: hidden;
+}
+
+.cell-progress .bar > i {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.2s linear;
+}
+
+.cell-progress > span {
+    position: relative;
+}
+
+.cell-speed {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.cell-status {
+    color: var(--text-dim);
+}
+
+/* Status colours. The accelerated flag is the only one the original tints. */
+tr[data-status="done"] .cell-name { color: var(--ok); }
+tr[data-status="error"] .cell-name { color: var(--err); }
+tr[data-accelerated="1"] .cell-speed { color: var(--accent); }
+
+.empty {
+    padding: 40px;
+    color: var(--text-dim);
+    text-align: center;
+}
+
+.empty.is-hidden {
+    display: none;
+}
+
+/* Plugin views ------------------------------------------------------------- */
+
+#views:empty {
+    display: none;
+}
+
+#views {
+    border-top: 1px solid var(--line);
+}
+
+#views webview {
+    display: block;
+    width: 100%;
+    height: 0;
+    border: 0;
+}
+
+#views webview.is-open {
+    height: 320px;
+}
