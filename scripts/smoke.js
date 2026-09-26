@@ -17,19 +17,30 @@ const assert = require("assert");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const http = require("http");
+const crypto = require("crypto");
 
 const contract = require("../src/main/contract");
 const vipToken = require("../src/main/vip-token");
 const { createMesh } = require("../src/main/rpc");
 const { ThunderKernel, createNullEngine, TASK_STATUS } = require("../src/main/kernel");
 const login = require("../src/main/login");
+const { createApplication } = require("../src/main/index");
 
 let passed = 0;
 let failed = 0;
 
 function test(name, fn) {
     try {
-        fn();
+        const result = fn();
+        // This harness does not await, so an async test would record a pass
+        // before its assertions ran, and a failure inside it would surface as
+        // an unhandled rejection rather than as a failing test. Two of them
+        // were written that way and passed for as long as nobody looked.
+        // Refusing is the only way this stays fixed.
+        if (result && typeof result.then === "function") {
+            throw new Error("this test is async; use testAsync so that it is awaited");
+        }
         passed += 1;
         console.log(`  ok    ${name}`);
     } catch (err) {
@@ -50,6 +61,18 @@ async function testAsync(name, fn) {
         console.log(`        ${err.message}`);
     }
 }
+
+/*
+ * The whole suite runs inside one async function.
+ *
+ * It has to. Several of these tests await, and at module scope a `test(...)`
+ * call with an async body returns a promise nobody holds: the test is recorded
+ * as a pass before its assertions have run, and a failure inside it appears as
+ * an unhandled rejection rather than as a failing test. Seven of them were
+ * written that way, and the only reason it went unnoticed is that the harness
+ * accepted it.
+ */
+(async () => {
 
 console.log("contract");
 
@@ -255,7 +278,7 @@ test("oldTokens carry through as tokeninfo", () => {
 
 console.log("\nrpc");
 
-test("call resolves to a two element tuple", async () => {
+await testAsync("call resolves to a two element tuple", async () => {
     const mesh = createMesh();
     mesh.login.registerFunction("ping", async () => "pong");
     const result = await mesh.renderer.callRemoteClientFunction(
@@ -267,7 +290,7 @@ test("call resolves to a two element tuple", async () => {
     assert.strictEqual(result[0], "pong");
 });
 
-test("a failing call returns null plus a message rather than throwing", async () => {
+await testAsync("a failing call returns null plus a message rather than throwing", async () => {
     const mesh = createMesh();
     const result = await mesh.renderer.callRemoteClientFunction(
         contract.CONTEXTS.LOGIN_RENDERER,
@@ -277,14 +300,14 @@ test("a failing call returns null plus a message rather than throwing", async ()
     assert.ok(typeof result[1] === "string" && result[1].length > 0);
 });
 
-test("an unknown context is reported, not thrown", async () => {
+await testAsync("an unknown context is reported, not thrown", async () => {
     const mesh = createMesh();
     const result = await mesh.renderer.callRemoteClientFunction("nowhere", "f");
     assert.strictEqual(result[0], null);
     assert.ok(result[1].includes("nowhere"));
 });
 
-test("a thrown handler becomes a null tuple", async () => {
+await testAsync("a thrown handler becomes a null tuple", async () => {
     const mesh = createMesh();
     mesh.login.registerFunction("boom", async () => {
         throw new Error("exploded");
@@ -297,7 +320,7 @@ test("a thrown handler becomes a null tuple", async () => {
     assert.strictEqual(result[1], "exploded");
 });
 
-test("the first event handler owns the result", async () => {
+await testAsync("the first event handler owns the result", async () => {
     const mesh = createMesh();
     const seen = [];
     mesh.login.attachServerEvent("evt", () => {
@@ -316,7 +339,7 @@ test("the first event handler owns the result", async () => {
     assert.deepStrictEqual(seen, ["first", "second"]);
 });
 
-test("broadcast reaches every listener", async () => {
+await testAsync("broadcast reaches every listener", async () => {
     const mesh = createMesh();
     const got = [];
     mesh.renderer.attachServerEvent("b", (x) => got.push(["renderer", x]));
@@ -393,7 +416,7 @@ test("addTask returns a usable id", () => {
     assert.ok(kernel.getTask(id));
 });
 
-test("kernel forwards engine events under the original names", async () => {
+await testAsync("kernel forwards engine events under the original names", async () => {
     const engine = createNullEngine();
     const kernel = new ThunderKernel({ engine });
     const seen = [];
@@ -460,10 +483,87 @@ test("build number is the last dotted component", () => {
 
 console.log("\nboot");
 
-(async () => {
+/*
+ * A path that is never a binary, used to ask for the stub engine.
+ *
+ * "No engine" has to be requested rather than assumed. A bare
+ * createApplication picks up bin/aria2c.exe once a developer has run
+ * engine:fetch, so a test that says nothing about the engine silently gets the
+ * real one -- which spawns a process, perturbs the timing of everything after
+ * it, and makes the suite pass or fail depending on whether a gitignored
+ * directory happens to be populated. It did exactly that: the renderer event
+ * test failed only on machines that had fetched the engine.
+ *
+ * So every application built here names its engine. The stub, unless the test
+ * asks for something else, and `realEnginePath()` when it wants the real one.
+ */
+const STUB_ENGINE_PATH = "/definitely/not/here/aria2c";
+
+function testApplication(options) {
+    const opts = options || {};
+    const config = Object.assign(
+        { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        opts.config || {}
+    );
+    if (!("aria2Path" in config)) config.aria2Path = STUB_ENGINE_PATH;
+    return createApplication(Object.assign({}, opts, { config }));
+}
+
+/*
+ * The bundled engine, if this checkout has one.
+ *
+ * scripts/fetch-engine.js writes it to bin/, which is gitignored, so CI has
+ * none and a developer machine usually does. Tests that need the real thing
+ * ask through here and skip with a stated reason when it is absent, rather
+ * than quietly testing the stub a second time.
+ */
+function realEnginePath() {
+    const name = process.platform === "win32" ? "aria2c.exe" : "aria2c";
+    const candidate = path.join(__dirname, "..", "bin", name);
+    return fs.existsSync(candidate) ? candidate : null;
+}
+
+/*
+ * Remove a directory, giving Windows a moment to let go of it.
+ *
+ * A directory that was a child process's working directory stays locked for
+ * about a tenth of a second after that process exits, and rmdir answers EBUSY
+ * for that whole time. fs.rmSync's own maxRetries does not cover it here, so
+ * the wait is explicit. Without this the download test reports a failure on
+ * a run where the download was perfect.
+ */
+async function removeDirectory(dir) {
+    const deadline = Date.now() + 12000;
+    for (;;) {
+        try {
+            fs.rmSync(dir, { recursive: true, force: true });
+            return;
+        } catch (err) {
+            if (Date.now() > deadline) throw err;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+    }
+}
+
+/* Wait until aria2 answers, or give up. */
+async function engineReady(engine, deadlineMs) {
+    const deadline = Date.now() + deadlineMs;
+    while (Date.now() < deadline) {
+        if (engine.rpc) {
+            try {
+                await engine.rpc.call("aria2.getVersion");
+                return true;
+            } catch {
+                // The port is bound but aria2 is not serving yet.
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+}
+
     await testAsync("the application boots with no config", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "test-app",
                 appkey: "test-key",
@@ -481,8 +581,7 @@ console.log("\nboot");
     });
 
     await testAsync("server functions answer through the mesh", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const loggedIn = await app.mesh.main.callServerFunction(
@@ -498,8 +597,7 @@ console.log("\nboot");
     });
 
     await testAsync("the dcdn rpc swaps arguments into kernel order", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const taskId = app.kernel.addTask({ url: "http://x/1" });
@@ -523,8 +621,7 @@ console.log("\nboot");
     });
 
     await testAsync("a plugin call strips the two context arguments", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         // GET_CONFIG_MODULES takes (module, key). If the wrapper were missing,
@@ -541,8 +638,7 @@ console.log("\nboot");
     });
 
     await testAsync("peer id is stable across calls", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const first = app.getPeerId();
@@ -552,8 +648,7 @@ console.log("\nboot");
     });
 
     await testAsync("getConfigModules returns the shipped defaults", async () => {
-        const { createApplication } = require("../src/main/index");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         assert.deepStrictEqual(app.getConfigModules("HDVideo", "domains"), ["hd.xunlei.com"]);
@@ -571,10 +666,7 @@ console.log("\nboot");
     // -----------------------------------------------------------------------
     console.log("\nplugin host");
 
-    const os = require("os");
-    const fs = require("fs");
     const pluginHost = require("../src/main/plugin-host");
-    const { createApplication } = require("../src/main/index");
 
     function makeFakePlugin(rootDir, name, entrySource) {
         const dir = path.join(rootDir, name);
@@ -605,7 +697,7 @@ console.log("\nboot");
              };`
         );
 
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const manifest = await app.loadPlugin(dir);
@@ -631,7 +723,7 @@ console.log("\nboot");
         const dir = makeFakePlugin(root, "Fake", "void 0;");
 
         const before = Object.prototype.hasOwnProperty.call(global, "__rootDir");
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         await app.loadPlugin(dir);
@@ -679,7 +771,7 @@ console.log("\nboot");
         makeFakePlugin(root, "Good", "void 0;");
         const bad = makeFakePlugin(root, "Bad", "throw new Error('boom');");
 
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const results = await app.loadPlugins(root);
@@ -701,7 +793,7 @@ console.log("\nboot");
              });`
         );
 
-        const app = await createApplication({
+        const app = await testApplication({
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         await app.loadPlugin(dir);
@@ -817,14 +909,36 @@ console.log("\nboot");
         assert.ok(Number.isFinite(mapped.progress));
     });
 
-    test("all generated turbo flags are accepted by the patched option names", () => {
+    test("the turbo flags are present and carry values aria2 accepts", () => {
         const engine = new aria2.Aria2Engine({ binary: "/nonexistent/aria2c" });
         const args = engine.buildArgs().join(" ");
-        // These only exist in a Turbo build. If the wiring dropped a patch the
-        // engine would start and quietly download slower.
-        assert.ok(args.includes("--max-connection-per-server=-1"), args);
+
+        // Names that only exist in a Turbo build. If the wiring dropped a
+        // patch the engine would still start and quietly download slower.
         assert.ok(args.includes("--min-split-size=1K"), args);
         assert.ok(args.includes("--retry-on-400=true"), args);
+
+        /*
+         * And the values have to be ones aria2 takes.
+         *
+         * -1 is not among them. It is the ceiling the patch writes into the
+         * option handler, not a value the option accepts, and passing it makes
+         * aria2 refuse to start:
+         *
+         *     errorCode=28 max-connection-per-server must be >= 1
+         *
+         * This test asserted -1 for as long as the engine passed it, so it
+         * agreed with the bug rather than catching it. Checking the shape of
+         * the value is what makes it a test.
+         */
+        for (const name of ["max-connection-per-server", "split"]) {
+            const match = args.match(new RegExp(`--${name}=(-?\\d+)`));
+            assert.ok(match, `--${name} must be passed`);
+            assert.ok(
+                Number(match[1]) >= 1,
+                `--${name} must be at least 1, got ${match[1]}`
+            );
+        }
     });
 
     test("the engine saves and reloads a session", () => {
@@ -851,13 +965,13 @@ console.log("\nboot");
         assert.strictEqual(events[1].bAcclerating, false);
     });
 
-    test("a free port is actually free", async () => {
+    await testAsync("a free port is actually free", async () => {
         const port = await aria2.findFreePort();
         assert.ok(port > 0 && port < 65536, String(port));
     });
 
     await testAsync("the application boots with a stub when aria2 is absent", async () => {
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                 aria2Path: "/definitely/not/here/aria2c",
@@ -870,7 +984,7 @@ console.log("\nboot");
     });
 
     await testAsync("a task event reaches a renderer listener", async () => {
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                 aria2Path: "/definitely/not/here/aria2c",
@@ -897,7 +1011,7 @@ console.log("\nboot");
     });
 
     await testAsync("a task event also reaches the kernel's own map", async () => {
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                 aria2Path: "/definitely/not/here/aria2c",
@@ -912,12 +1026,12 @@ console.log("\nboot");
         await app.stop();
     });
 
-    test("a configured engine path is only accepted if it is a file", async () => {
+    await testAsync("a configured engine path is only accepted if it is a file", async () => {
         // Windows has no executable bit, so an existence check alone would
         // accept a directory and the engine would fail to spawn much later.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "thunderx-probe-"));
         try {
-            const app = await createApplication({
+            const app = await testApplication({
                 config: {
                     appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                     aria2Path: dir,
@@ -926,7 +1040,156 @@ console.log("\nboot");
             assert.strictEqual(app.engine, undefined, "a directory must not be taken for the binary");
             await app.stop();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            await removeDirectory(dir);
+        }
+    });
+
+    /*
+     * The names the kernel calls, on both engines.
+     *
+     * The kernel tests `typeof engine.x === "function"` before every call, so a
+     * name that is missing is not an error -- it is a silent no-op. That is how
+     * a real engine exposing `stop` instead of `shutdown` ran to completion and
+     * left aria2c behind, and how a duplicated `start` shadowed the lifecycle
+     * one. The stub answered to everything, so neither showed up.
+     *
+     * Comparing the two sets is what turns that class of mistake into a
+     * failure. It is deliberately a list of names rather than a reflection over
+     * one engine: a name has to be on both sides to count.
+     */
+    test("both engines implement the names the kernel calls", () => {
+        const names = [
+            "addTask", "removeTask", "resumeTask", "pause",
+            "setUserInfo", "setGlobalExtInfo",
+            "enableDcdn", "updateDcdn", "disableDcdn",
+            "start", "shutdown",
+        ];
+        const stub = createNullEngine();
+        for (const name of names) {
+            assert.strictEqual(
+                typeof stub[name], "function",
+                `the stub engine must implement ${name}`
+            );
+            assert.strictEqual(
+                typeof aria2.Aria2Engine.prototype[name], "function",
+                `the aria2 engine must implement ${name}`
+            );
+        }
+    });
+
+    /*
+     * The real engine, when this checkout has one.
+     *
+     * The suite passed for a long time without ever starting aria2, because the
+     * stub answers to every name and a real engine that could not boot at all
+     * looked identical to one that could. So this test runs the binary when it
+     * is present and says so when it is not, rather than silently testing the
+     * stub twice.
+     */
+    await testAsync("the bundled engine boots, when the checkout has one", async () => {
+        const binary = realEnginePath();
+        if (!binary) {
+            console.log("        skipped: no bin/ engine; run npm run engine:fetch");
+            return;
+        }
+
+        const app = await testApplication({ config: { aria2Path: binary } });
+        assert.ok(app.engine, "a real binary must produce a real engine");
+
+        // The regression, stated directly. A per-task `start(taskId)` used to
+        // replace the lifecycle `start()` in the same class, so this returned
+        // undefined and the `.catch` the caller attaches threw from inside
+        // createApplication. Asserting the shape fails here, where the cause is
+        // legible, instead of two frames up where it is not.
+        const started = app.engine.start();
+        assert.ok(
+            started && typeof started.then === "function",
+            "engine.start() must return a promise, not undefined"
+        );
+        await started;
+
+        assert.ok(
+            await engineReady(app.engine, 20000),
+            "aria2 must answer on its rpc port"
+        );
+
+        const taskId = app.kernel.addTask({ url: "http://example.com/engine.bin" });
+        assert.ok(taskId, "the kernel must accept a task while the engine is up");
+
+        await app.stop();
+        assert.strictEqual(
+            app.engine.process, null,
+            "the engine process must be gone once the application has stopped"
+        );
+    });
+
+    /*
+     * A real download, over a real socket, through the real binary.
+     *
+     * Everything above this line can pass while the engine is unable to fetch
+     * anything: the stub is happy to pretend, and a real engine that starts and
+     * then fails on the first task looks the same from the outside. This is the
+     * test that says the thing actually works.
+     *
+     * The payload is random so that a truncated or empty transfer cannot match,
+     * and it is served from a loopback server so the suite needs no network.
+     */
+    await testAsync("the bundled engine downloads a file", async () => {
+        const binary = realEnginePath();
+        if (!binary) {
+            console.log("        skipped: no bin/ engine; run npm run engine:fetch");
+            return;
+        }
+
+        const payload = crypto.randomBytes(512 * 1024);
+        const server = http.createServer((req, res) => {
+            res.writeHead(200, {
+                "Content-Length": payload.length,
+                "Content-Type": "application/octet-stream",
+            });
+            res.end(payload);
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "thunderx-download-"));
+        let app;
+        try {
+            const port = server.address().port;
+            app = await testApplication({
+                config: { aria2Path: binary, downloadDir: dir },
+            });
+
+            const completed = new Promise((resolve, reject) => {
+                const timer = setTimeout(
+                    () => reject(new Error("the download did not finish in 30s")),
+                    30000
+                );
+                app.kernel.on("OnTaskCompleted", (task) => {
+                    clearTimeout(timer);
+                    resolve(task);
+                });
+            });
+
+            app.kernel.addTask({ url: `http://127.0.0.1:${port}/payload.bin` });
+            const task = await completed;
+
+            assert.ok(task.filePath, "a completed task must report where the file went");
+            const received = fs.readFileSync(task.filePath);
+            assert.strictEqual(
+                received.length, payload.length,
+                "the file must be the size that was served"
+            );
+            assert.ok(received.equals(payload), "the bytes must match what was served");
+        } finally {
+            if (app) await app.stop();
+            server.close();
+            // Windows holds the download directory for a moment after aria2
+            // exits -- the .aria2 control file and the process's working
+            // directory are both inside it. The release is not immediate and it
+            // is longer when the machine is busy, which is what a full suite
+            // run looks like. Retrying is the documented remedy; letting this
+            // fail would report a download bug that is not there.
+            await removeDirectory(dir);
         }
     });
 
@@ -939,7 +1202,7 @@ console.log("\nboot");
      * worth catching here.
      */
     await testAsync("the renderer's task functions are reachable over the transport", async () => {
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                 aria2Path: "/definitely/not/here/aria2c",
@@ -973,7 +1236,7 @@ console.log("\nboot");
     });
 
     await testAsync("an unregistered method resolves to nothing rather than throwing", async () => {
-        const app = await createApplication({
+        const app = await testApplication({
             config: {
                 appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
                 aria2Path: "/definitely/not/here/aria2c",

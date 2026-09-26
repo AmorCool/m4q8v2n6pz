@@ -12,7 +12,7 @@
         "engine:list": "node scripts/fetch-engine.js --list",
         "pack": "npm run engine:fetch && electron-builder --win --x64 --dir",
         "dist": "npm run engine:fetch && electron-builder --win --x64",
-        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/engine-aria2.js && node --check src/main/index.js && node --check src/main/electron-main.js && node --check src/preload/index.js && node --check src/renderer/index.js && node --check scripts/fetch-engine.js"
+        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/engine-aria2.js && node --check src/main/index.js && node --check src/main/electron-main.js && node --check src/preload/index.js && node --check src/renderer/index.js && node --check scripts/fetch-engine.js && node --check scripts/smoke.js"
     },
     "engines": {
         "node": ">=18"

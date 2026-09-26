@@ -14,13 +14,23 @@
  *
  *     engine.addTask(spec)        -> taskId
  *     engine.removeTask(taskId)   -> void
- *     engine.start(taskId)        -> void
+ *     engine.resumeTask(taskId)   -> void
  *     engine.pause(taskId)        -> void
  *     engine.setUserInfo(userId, token)
  *     engine.setGlobalExtInfo(str, bool)
  *     engine.enableDcdn(taskId, fileIndex, cert)
  *     engine.updateDcdn(taskId, fileIndex, cert)
  *     engine.disableDcdn(taskId, fileIndex)
+ *
+ * Plus the lifecycle pair the application drives rather than the kernel:
+ *
+ *     engine.start()              -> Promise
+ *     engine.shutdown()           -> Promise
+ *
+ * The per-task resume is `resumeTask` and not `start` so that it cannot
+ * collide with the lifecycle `start` in a class that implements both. That
+ * collision is not hypothetical: it was live, and it is written up in
+ * engine-aria2.js.
  *
  * Events come back through the `on` channel using the exact event names the
  * original uses, because the UI subscribes by string.
@@ -183,7 +193,7 @@ class ThunderKernel extends EventEmitter {
     }
 
     startTask(taskId) {
-        return this.engine.start ? this.engine.start(taskId) : undefined;
+        return this.engine.resumeTask ? this.engine.resumeTask(taskId) : undefined;
     }
 
     pauseTask(taskId) {
@@ -298,7 +308,19 @@ function createNullEngine() {
         removeTask(taskId) {
             setImmediate(() => emitter.emit("task-removed", { taskId }));
         },
-        start() {},
+        // The lifecycle and the per-task calls are separate names here for the
+        // same reason they are separate in the real engine, and the stub is
+        // where getting that wrong stays invisible.
+        //
+        // This used to be a single `start() {}`. Being empty and argument-less
+        // it answered to both meanings, so the kernel's per-task resume worked
+        // and the application's engine boot worked, and a real engine that had
+        // only one of them could not be told apart from a working one. A stub
+        // is worth having only if it fails where the real thing would.
+        async start() {
+            return this;
+        },
+        resumeTask() {},
         pause() {},
         setUserInfo() {},
         setGlobalExtInfo() {},

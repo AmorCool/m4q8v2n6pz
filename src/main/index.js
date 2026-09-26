@@ -384,18 +384,27 @@ class Application extends EventEmitter {
      * aria2 is shipped alongside the app rather than found on PATH, because a
      * user-installed aria2 will not have the Turbo patches and would silently
      * clamp the connection count. So the search is: explicit config, then the
-     * locations the packaging step uses, then PATH as a last resort.
+     * locations the packaging step uses.
+     *
+     * A configured path is the whole answer, and is not a first candidate.
+     * Falling through to the bundled locations when it is missing turns a
+     * configuration error into a silent switch of engine, and the two engines
+     * differ in ways that matter -- the bundled one carries the Turbo patches,
+     * and only one of them can actually boot. A caller who names a binary gets
+     * that binary or gets the stub, which is visible, and never a third thing
+     * they did not ask for.
      */
     _createEngine() {
         const configured = this.config.aria2Path;
         const name = process.platform === "win32" ? "aria2c.exe" : "aria2c";
 
-        const candidates = [
-            configured,
-            path.join(APP_ROOT, "bin", name),
-            path.join(APP_ROOT, "vendor", "aria2", name),
-            path.join(process.resourcesPath || "", "bin", name),
-        ].filter(Boolean);
+        const candidates = configured
+            ? [configured]
+            : [
+                  path.join(APP_ROOT, "bin", name),
+                  path.join(APP_ROOT, "vendor", "aria2", name),
+                  path.join(process.resourcesPath || "", "bin", name),
+              ];
 
         let binary = "";
         for (const candidate of candidates) {
@@ -406,7 +415,14 @@ class Application extends EventEmitter {
         }
 
         if (!binary) {
-            this.log.information("no aria2 binary found; downloads are stubbed");
+            if (configured) {
+                this.log.warning(
+                    `the configured aria2 path does not exist: ${configured}; ` +
+                        `downloads are stubbed`
+                );
+            } else {
+                this.log.information("no aria2 binary found; downloads are stubbed");
+            }
             return null;
         }
 

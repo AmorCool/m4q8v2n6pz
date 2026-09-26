@@ -14,6 +14,11 @@
  * failed on the upload step for exactly that reason while the binary itself
  * was fine.
  *
+ * The build repository is private, so this needs a token. It takes one from
+ * GITHUB_TOKEN or GH_TOKEN, falls back to `gh auth token`, and says so plainly
+ * when neither is available -- an unauthenticated request for a private
+ * repository answers 404, which otherwise reads as "no releases yet".
+ *
  * Usage:
  *     node scripts/fetch-engine.js              # current platform
  *     node scripts/fetch-engine.js win32-x64
@@ -28,6 +33,41 @@ const { execFileSync } = require("child_process");
 
 const REPO = "AmorCool/aria2-cross";
 const BIN_DIR = path.join(__dirname, "..", "bin");
+
+/*
+ * A token, if one can be found, and nothing if not.
+ *
+ * The build repository is private, and GitHub answers an unauthenticated
+ * request for a private repository with 404 rather than 403. That is the
+ * confusing part: the message reads "no releases yet" when the releases exist
+ * and are merely invisible to the caller. A token is what makes them visible.
+ *
+ * The order is deliberate. An explicit environment variable wins, because it
+ * is the only one a CI run or a shell can set for a single command. `gh auth
+ * token` is second, because anyone who has the CLI logged in has already made
+ * this decision once. Failing both, the request goes out unauthenticated,
+ * which is correct for a public fork and produces a clear error here.
+ */
+function findToken() {
+    for (const name of ["GITHUB_TOKEN", "GH_TOKEN"]) {
+        const value = process.env[name];
+        if (value && value.trim()) return value.trim();
+    }
+    try {
+        const token = execFileSync("gh", ["auth", "token"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        if (token) return token;
+    } catch {
+        // gh is absent or not logged in. Both are ordinary.
+    }
+    return null;
+}
+
+function authHeaders(token) {
+    return token ? ["-H", `Authorization: token ${token}`] : [];
+}
 
 /*
  * Which release asset belongs to which platform.
@@ -68,24 +108,38 @@ function listTargets() {
  * release that exists but has no assets both return the same 404 from the
  * browser URL, and the error this script should print differs between them.
  */
-function releaseAssets() {
+function releaseAssets(token) {
     let out;
     try {
         out = execFileSync(
             "curl",
-            ["-fsSL", `https://api.github.com/repos/${REPO}/releases?per_page=20`],
+            [
+                "-fsSL",
+                ...authHeaders(token),
+                `https://api.github.com/repos/${REPO}/releases?per_page=20`,
+            ],
             { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }
         );
     } catch (error) {
-        // A 404 here means the repository has no releases yet, not that the
-        // network is down, and those two call for different responses. curl
-        // reports both as a non-zero exit.
+        // A 404 here means the repository is not visible to this caller, which
+        // for a private repository means no token was found. The network being
+        // down looks the same to curl, so the two are separated by asking again
+        // without -f: a real 404 answers with a body, a failed connection does
+        // not answer at all.
         const detail = String((error.stderr || "") + (error.stdout || ""));
         if (detail.includes("404")) {
+            if (!token) {
+                throw new Error(
+                    `${REPO} is private and no token was found, so GitHub ` +
+                        `reports it as missing rather than as forbidden. Set ` +
+                        `GITHUB_TOKEN, or log in with \`gh auth login\`, then ` +
+                        `run this again.`
+                );
+            }
             throw new Error(
-                `${REPO} has no releases yet. The binaries come from its CI ` +
-                    `workflow; run it once, or pass --from <dir> to use a local ` +
-                    `build tree.`
+                `${REPO} has no releases, even with a token. The binaries come ` +
+                    `from its CI workflow; run it once, or pass --from <dir> to ` +
+                    `use a local build tree.`
             );
         }
         throw new Error(`could not reach the GitHub API: ${detail.trim() || error.message}`);
@@ -100,12 +154,34 @@ function releaseAssets() {
     return releases;
 }
 
-function download(url, destination) {
+/*
+ * Assets are downloaded through the API rather than from the browser URL.
+ *
+ * `browser_download_url` is a redirect that requires the same authentication
+ * as the API for a private repository, so it is not usable here. The asset
+ * endpoint with an octet-stream accept header is the documented way to pull
+ * a private release asset, and it works for a public one too.
+ */
+function download(asset, destination, token) {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     // Written to a temporary name and renamed, so an interrupted download can
     // never leave a half-file in place that the launcher would then try to run.
     const temporary = `${destination}.part`;
-    execFileSync("curl", ["-fsSL", "-o", temporary, url], { stdio: "inherit" });
+    const url = token
+        ? `https://api.github.com/repos/${REPO}/releases/assets/${asset.id}`
+        : asset.browser_download_url;
+    execFileSync(
+        "curl",
+        [
+            "-fsSL",
+            ...authHeaders(token),
+            ...(token ? ["-H", "Accept: application/octet-stream"] : []),
+            "-o",
+            temporary,
+            url,
+        ],
+        { stdio: "inherit" }
+    );
     fs.renameSync(temporary, destination);
 }
 
@@ -168,7 +244,8 @@ function main() {
     }
 
     console.log(`looking for a ${target} build in ${REPO}`);
-    const releases = releaseAssets();
+    const token = findToken();
+    const releases = releaseAssets(token);
 
     // Newest first, and the first asset that matches both the target and the
     // naming pattern wins. A release can legitimately carry assets for several
@@ -178,7 +255,7 @@ function main() {
         if (!asset) continue;
         const destination = path.join(BIN_DIR, wanted.name);
         console.log(`downloading ${asset.name} from ${release.tag_name}`);
-        download(asset.browser_download_url, destination);
+        download(asset, destination, token);
         console.log(`placed ${destination}`);
         return;
     }

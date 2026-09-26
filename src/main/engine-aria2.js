@@ -45,6 +45,20 @@ const os = require("os");
 
 const { TASK_STATUS } = require("./kernel");
 
+/*
+ * Connection counts passed to aria2 on every start.
+ *
+ * Both are plain positive integers and both must be: aria2 rejects -1 for
+ * either, because -1 is the *ceiling* the patch sets in the option handler,
+ * not a value the option accepts. See buildArgs for the details.
+ *
+ * 16 is upstream's old ceiling and the number the community config settles on.
+ * The patch is what makes a value above 16 legal, so a task that wants more
+ * can ask for it; the engine's own default does not presume to.
+ */
+const TURBO_MAX_CONNECTIONS = 16;
+const TURBO_SPLIT = 16;
+
 /** aria2 reports status as a string; the kernel wants a number. */
 const ARIA2_STATUS_MAP = Object.freeze({
     active: TASK_STATUS.DOWNLOADING,
@@ -237,6 +251,8 @@ class Aria2Engine extends EventEmitter {
 
         this.process = null;
         this.rpc = null;
+        this._rpcReady = null;
+        this._startPromise = null;
         this.secret = crypto.randomBytes(24).toString("hex");
         this.port = opts.port || 0;
 
@@ -273,12 +289,49 @@ class Aria2Engine extends EventEmitter {
      * file the user might have edited, so behaviour cannot drift with whatever
      * is in their home directory. The generated config is written too, but only
      * so that a person debugging a download can see what was passed.
+     *
+     * Idempotent, including when two callers arrive together, and that part is
+     * load-bearing. The guard used to be `if (this.process) return this`, and
+     * `this.process` is not assigned until after a free port has been found --
+     * which awaits. Two callers inside that window both got past the guard and
+     * both spawned aria2c. shutdown() then killed only the one it held a
+     * reference to, and the other kept running with its working directory
+     * open, which is how a test came to fail with EBUSY on a directory that no
+     * live engine admitted to owning.
      */
-    async start() {
+    start() {
+        if (!this._startPromise) {
+            this._startPromise = this._doStart().catch((err) => {
+                // A failed start is not remembered: every later attempt would
+                // otherwise return this same rejection.
+                this._startPromise = null;
+                throw err;
+            });
+        }
+        return this._startPromise;
+    }
+
+    async _doStart() {
         if (this.process) return this;
         if (!this.binary) throw new Error("Aria2Engine needs a binary path");
 
         fs.mkdirSync(this.workDir, { recursive: true });
+
+        /*
+         * The session file has to exist before aria2 is pointed at it.
+         *
+         * --input-file is a request to load the URIs listed in a file, and a
+         * file that is not there is an error rather than an empty list:
+         *
+         *     errorCode=1 Failed to open the file .../aria2.session,
+         *     cause: File not found or it is a directory
+         *
+         * aria2 exits before it opens the RPC port, which is why this showed up
+         * as ECONNREFUSED rather than as anything mentioning the session. The
+         * same path is what --save-session writes, so an empty file is exactly
+         * the right starting state: nothing to restore.
+         */
+        if (!fs.existsSync(this.sessionFile)) fs.writeFileSync(this.sessionFile, "");
         if (!this.port) this.port = await findFreePort();
 
         const args = this.buildArgs();
@@ -300,7 +353,10 @@ class Aria2Engine extends EventEmitter {
         this.process.on("error", (err) => this.emit("engine-error", err));
 
         this.rpc = new Aria2RpcClient({ port: this.port, secret: this.secret });
-        await this.rpc.waitUntilReady();
+        // Kept so that work arriving before aria2 is listening can wait for it
+        // rather than fail. See _awaitReady.
+        this._rpcReady = this.rpc.waitUntilReady();
+        await this._rpcReady;
 
         // Notify mode would push updates; polling is used instead, so the
         // method is disabled to avoid the overhead of aria2 tracking
@@ -339,10 +395,32 @@ class Aria2Engine extends EventEmitter {
             "--save-session-interval=30",
             "--force-save=true",
 
-            // Turbo settings. -x unlimited is the patch; without it aria2
-            // clamps to 16 and silently ignores the rest.
-            "--max-connection-per-server=-1",
-            "--split=-1",
+            /*
+             * Turbo settings.
+             *
+             * The patch raises the *ceiling* on these two, it does not make -1
+             * a value. In OptionHandlerFactory the handler is
+             *
+             *     NumberOptionHandler(PREF_MAX_CONNECTION_PER_SERVER, ...,
+             *                         "1", 1, 16, 'x')
+             *                                      ^  ^^
+             *                                    min  max
+             *
+             * and the patch changes the last number to -1. So -1 means
+             * "unbounded", not "pass -1", and both options still require a
+             * value of at least 1. Passing -1 makes aria2 refuse to start:
+             *
+             *     errorCode=28 ... '--max-connection-per-server'
+             *     max-connection-per-server must be greater than or equal to 1
+             *
+             * The defaults here are the stock ceiling and the value the
+             * community config uses. What the patch buys is that a task can
+             * now ask for more than 16; the engine does not decide to.
+             */
+            `--max-connection-per-server=${TURBO_MAX_CONNECTIONS}`,
+            `--split=${TURBO_SPLIT}`,
+            // The patch lowers this floor from 1M to 1K, which is what makes a
+            // large split useful on small files.
             "--min-split-size=1K",
             "--file-allocation=none",
 
@@ -391,25 +469,53 @@ class Aria2Engine extends EventEmitter {
         return "";
     }
 
-    async stop() {
+    /*
+     * Named `shutdown` to match the kernel, which is the only caller.
+     *
+     * It was `stop`, and the kernel looks for `shutdown`, so the real engine
+     * was never shut down at all: the app closed and left aria2c running. The
+     * stub has `shutdown`, so nothing complained -- the same shape of mistake
+     * as the duplicated `start` above, and it is why there is now a test that
+     * compares the two engines' method names.
+     */
+    async shutdown() {
         this.stopping = true;
         this._stopPolling();
 
-        if (this.rpc) {
-            // A graceful shutdown folds the session file, which is what makes
-            // the next start resumable. It is worth waiting for.
+        const proc = this.process;
+        const rpc = this.rpc;
+
+        this.process = null;
+        this.rpc = null;
+        this._rpcReady = null;
+        // Cleared so that a stopped engine can be started again rather than
+        // handing back the promise from the run that has just ended.
+        this._startPromise = null;
+
+        if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+            // Already gone. Waiting here is not harmless: the `exit` event has
+            // fired, so a listener added now would never run and the wait would
+            // burn its whole timeout. That is what made every stop take three
+            // seconds and end in a SIGKILL aimed at a process that had already
+            // exited cleanly.
+            this.emit("engine-stopped");
+            return;
+        }
+
+        if (rpc) {
+            // Graceful first: aria2 folds the session file on the way out, and
+            // that file is what makes the next run resumable.
             try {
-                await this.rpc.call("aria2.shutdown");
+                await rpc.call("aria2.shutdown");
             } catch (err) {
                 this.log("graceful shutdown failed:", err.message);
             }
         }
 
-        const proc = this.process;
-        this.process = null;
-        this.rpc = null;
-
-        if (proc && !proc.killed) {
+        // The request is asynchronous, so the exit may not have happened yet.
+        // The check is repeated rather than assumed, for the same reason as
+        // above.
+        if (proc.exitCode === null && proc.signalCode === null) {
             await new Promise((resolve) => {
                 const killTimer = setTimeout(() => {
                     try {
@@ -425,6 +531,7 @@ class Aria2Engine extends EventEmitter {
                 });
             });
         }
+
         this.emit("engine-stopped");
     }
 
@@ -493,7 +600,35 @@ class Aria2Engine extends EventEmitter {
         return taskId;
     }
 
+    /*
+     * Wait until aria2 is listening, for work that arrives before it is.
+     *
+     * The application starts the engine without waiting for it, so a task can
+     * be added while start() is still finding a port, or while aria2 has been
+     * spawned but is not serving yet. In the first window the RPC client does
+     * not exist, and in the second it exists but cannot be called, and both
+     * surfaced as a failed task whose message was
+     *
+     *     Cannot read properties of null (reading 'call')
+     *
+     * which says nothing about the download. Pasting a link immediately after
+     * launch is an ordinary thing to do, so this waits rather than fails.
+     */
+    async _awaitReady(deadlineMs = 30000) {
+        const deadline = Date.now() + deadlineMs;
+        while (!this._rpcReady) {
+            if (this.stopping) throw new Error("the engine is shutting down");
+            if (Date.now() > deadline) {
+                throw new Error("the engine did not start; no aria2 to add a task to");
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await this._rpcReady;
+    }
+
     async _addToAria2(taskId, spec, options) {
+        await this._awaitReady();
+
         let gid;
 
         if (spec.torrentPath) {
@@ -535,7 +670,22 @@ class Aria2Engine extends EventEmitter {
         this.emit("task-removed", { taskId });
     }
 
-    start(taskId) {
+    /*
+     * Resume a task, and do not call this `start`.
+     *
+     * It was called `start` until it collided with the engine's own `start()`
+     * above. A class has one method per name, so the later definition silently
+     * replaced the earlier one, and `engine.start()` returned undefined from a
+     * per-task method that had no task id. The caller that wanted to boot the
+     * engine then called `.catch` on undefined:
+     *
+     *     TypeError: Cannot read properties of undefined (reading 'catch')
+     *
+     * The stub engine hid it. Its `start()` took no arguments and did nothing,
+     * so it satisfied both meanings and every test passed while the real
+     * engine could not boot at all.
+     */
+    resumeTask(taskId) {
         const gid = this.gidByTask.get(taskId);
         if (!gid || !this.rpc) return;
         this.rpc.call("aria2.unpause", [gid]).catch((err) => this.log("start failed:", err.message));
