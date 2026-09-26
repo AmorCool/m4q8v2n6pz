@@ -27,14 +27,22 @@ const contract = require("./contract");
 const { WindowManager } = require("./window-manager");
 const { NewTaskService } = require("./newtask");
 const { PanWindowService } = require("./panwindow");
+const { SettingsWindowService } = require("./settingswindow");
 const { SuspensionService, WINDOW_NAME: SUSPENSION_WINDOW } = require("./suspension");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
 /** Where a download goes when the user has not chosen anything else. */
 function defaultDownloadDir(application) {
+    // The settings window's 下载目录 is the user's own answer, so it outranks
+    // the app config's default; the last folder a task was committed to wins
+    // over both, because that is the one they just used.
+    const configured = application && application.configHandler
+        ? application.configHandler.defaultDownloadDir()
+        : "";
     return (
         (application && application.lastDownloadDir) ||
+        configured ||
         (application && application.config && application.config.downloadDir) ||
         path.join(os.homedir(), "ThunderX")
     );
@@ -131,9 +139,31 @@ async function boot() {
     let application;
     let newTask = null;
     let panWindow = null;
+    let settingsWindow = null;
     let suspension = null;
     try {
-        application = await createApplication();
+        application = await createApplication({
+            /*
+             * The settings file lives beside Electron's own files, under a
+             * `profiles` directory the way the original's `__profilesDir`
+             * does. It is passed in rather than resolved inside the
+             * application because that file is deliberately free of
+             * `electron`, and `app.getPath("userData")` only exists here.
+             */
+            configPath: path.join(app.getPath("userData"), "profiles", "config.json"),
+            /*
+             * 开机启动. The original writes HKCU\...\Run\Thunder itself
+             * (renderer.js:72719); Electron owns that key, so the one
+             * OS-level setting is injected as a callback.
+             */
+            setLoginItem: (openAtLogin) => {
+                try {
+                    app.setLoginItemSettings({ openAtLogin: !!openAtLogin });
+                } catch (err) {
+                    console.log("[settings] could not set login item:", err.message);
+                }
+            },
+        });
     } catch (error) {
         // A failed boot still has to show something: the window is already
         // created, and a blank one with no explanation is indistinguishable
@@ -175,6 +205,20 @@ async function boot() {
         log: (...a) => console.log("[pan]", ...a),
     });
     application.on("open-pan-window", () => panWindow.open());
+
+    /*
+     * The settings centre.
+     *
+     * Same split again: the process owns the window, the application owns the
+     * config store, and the page reads and writes settings over the transport.
+     * Nothing is pushed at open time -- the page fetches the schema and the
+     * current values itself, so a window opened while a write is pending
+     * still shows the truth.
+     */
+    settingsWindow = new SettingsWindowService({
+        windowManager,
+        log: (...a) => console.log("[settings]", ...a),
+    });
 
     /*
      * The floating ball and its panel.
@@ -294,6 +338,7 @@ async function boot() {
             newTask.open(prefill)
         ),
         [contract.SERVER_FUNCTIONS.CREATE_PAN_WINDOW]: fromRenderer(() => panWindow.open()),
+        [contract.SERVER_FUNCTIONS.CREATE_SETTINGS_WINDOW]: fromRenderer(() => settingsWindow.open()),
         // The ball's four. The first two are the original's own names, called
         // by its suspension renderer's `showOrHideMainWindow`; the last two
         // stand in for the `SetConfigValue("ConfigSuspension", ...)` pair the
@@ -415,6 +460,10 @@ async function boot() {
     const forwarded = Object.values(contract.KERNEL_EVENTS).concat([
         contract.NATIVE_EVENTS.ON_LOGIN_SUC,
         contract.NATIVE_EVENTS.ON_LOGOUT,
+        // The settings page listens for its own writes and for writes made
+        // anywhere else; the event has to reach every window, not just the
+        // one that made the change.
+        contract.NATIVE_EVENTS.ON_CONFIG_VALUE_CHANGED,
     ]);
 
     const relay = (name) => {

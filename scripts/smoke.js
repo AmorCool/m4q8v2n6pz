@@ -2339,6 +2339,484 @@ async function engineReady(engine, deadlineMs) {
         assert.strictEqual(byId["resume-all"].disabled, true, "nothing is paused or failed");
     });
 
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+console.log("settings");
+
+const settingsSchema = require("../src/renderer/settings-schema");
+const { ConfigStore, sameValue } = require("../src/main/config");
+const { ConfigHandler } = require("../src/main/config-handler");
+const { Aria2Engine } = require("../src/main/engine-aria2");
+const { SettingsWindowService, WINDOW_OPTIONS: SETTINGS_WINDOW_OPTIONS } =
+    require("../src/main/settingswindow");
+
+/** A throwaway config directory; the caller removes it. */
+function tempConfigDir() {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "thunderx-settings-"));
+}
+
+test("the schema has the original's eight categories", () => {
+    assert.strictEqual(settingsSchema.SETTINGS_SCHEMA.length, 8);
+    const labels = settingsSchema.SETTINGS_SCHEMA.map((c) => c.label);
+    assert.deepStrictEqual(labels, [
+        "基本设置", "云盘设置", "接管设置", "下载设置",
+        "任务管理", "提醒", "悬浮窗", "高级设置",
+    ]);
+});
+
+test("the schema covers the download core", () => {
+    // The spec counts "约 75" keys; the assertion is a floor rather than an
+    // exact number so adding a setting does not fail the suite.
+    assert.ok(
+        settingsSchema.countKeys() >= 70,
+        `expected at least 70 keys, found ${settingsSchema.countKeys()}`
+    );
+    const byName = {};
+    for (const item of settingsSchema.flattenItems()) byName[item.name] = item;
+
+    // The keys the download engine actually reads.
+    const required = [
+        "TaskDefaultSettings-OrignHostThreads",
+        "TaskDefaultSettings-MaxResourceLimit",
+        "TaskDefaultSettings-MaxResourceCount",
+        "TaskDefaultSettings-DefaultPath",
+        "TaskDefaultSettings-OpenFile",
+        "ConfigNormalSession-ConfigNormal_MaxRunningTaskCount",
+        "ConfigNet-ConfigNet_Type",
+        "ConfigNet-ConfigNet_Custom_MaxDownloadSpeed",
+        "ConfigNet-ConfigNet_Custom_MaxUploadSpeed",
+        "ProxySetting-ConfigProxy_Type",
+        "DiskCache-DiskCacheSelect",
+        "BtGenericSettings-ConfigBt_SetPortType",
+        "BtGenericSettings-ConfigBt_Manul_TcpPort",
+    ];
+    for (const name of required) {
+        assert.ok(byName[name], `the schema is missing ${name}`);
+    }
+    assert.strictEqual(byName["TaskDefaultSettings-OrignHostThreads"].default, "5");
+    assert.strictEqual(byName["DiskCache-DiskCacheSelect"].default, "256");
+});
+
+test("every schema name splits into a section and a key, once", () => {
+    const seen = new Set();
+    for (const item of settingsSchema.flattenItems()) {
+        const { section, key } = settingsSchema.splitName(item.name);
+        assert.ok(section && key, `bad name: ${item.name}`);
+        assert.ok(!seen.has(item.name), `duplicate name: ${item.name}`);
+        seen.add(item.name);
+        assert.ok(item.label !== undefined, `no label for ${item.name}`);
+        assert.ok(item.type, `no type for ${item.name}`);
+        assert.ok(item.default !== undefined, `no default for ${item.name}`);
+    }
+});
+
+test("defaultValues is a flat section.key map", () => {
+    const defaults = settingsSchema.defaultValues();
+    assert.strictEqual(defaults["TaskDefaultSettings.OrignHostThreads"], "5");
+    assert.strictEqual(defaults["ConfigNormalSession.ConfigNormal_AutoRun"], true);
+    assert.strictEqual(defaults["DiskCache.DiskCacheSelect"], "256");
+});
+
+test("annotate fills section and key without mutating the constant", () => {
+    const annotated = settingsSchema.annotate();
+    const first = annotated[0].items[0];
+    assert.strictEqual(first.section, "ConfigNormalSession");
+    assert.strictEqual(first.key, "ConfigNormal_AutoRun");
+    // The module's own table must not have been touched.
+    assert.strictEqual(settingsSchema.SETTINGS_SCHEMA[0].items[0].section, undefined);
+});
+
+test("a fresh store starts from the schema defaults", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    assert.strictEqual(store.getValue("TaskDefaultSettings", "OrignHostThreads"), "5");
+    assert.strictEqual(store.getValue("ConfigMsg", "ConfigMsg_Finish"), true);
+    // An unknown key falls through to the caller's fallback.
+    assert.strictEqual(store.getValue("Nope", "nope", "fallback"), "fallback");
+});
+
+test("a stored file is overlaid on the defaults, missing keys filled", () => {
+    const dir = tempConfigDir();
+    try {
+        const file = path.join(dir, "config.json");
+        fs.writeFileSync(file, JSON.stringify({
+            TaskDefaultSettings: { OrignHostThreads: "3" },
+        }));
+        const store = new ConfigStore({ path: file, schema: settingsSchema.SETTINGS_SCHEMA });
+        assert.strictEqual(store.getValue("TaskDefaultSettings", "OrignHostThreads"), "3");
+        // Not in the file: the schema default stands in.
+        assert.strictEqual(store.getValue("TaskDefaultSettings", "DefaultPath"), "");
+        assert.strictEqual(store.getValue("ConfigNormalSession", "ConfigNormal_MaxRunningTaskCount"), "5");
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("setValue fires only when the value actually changed", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const seen = [];
+    store.attachListener((section, key, value) => seen.push([section, key, value]));
+
+    assert.strictEqual(store.setValue("ConfigNet", "ConfigNet_Type", "1"), false, "same value");
+    assert.strictEqual(seen.length, 0);
+
+    assert.strictEqual(store.setValue("ConfigNet", "ConfigNet_Type", "0"), true);
+    assert.strictEqual(seen.length, 1);
+    assert.deepStrictEqual(seen[0], ["ConfigNet", "ConfigNet_Type", "0"]);
+
+    // A number and its string are the same setting.
+    assert.strictEqual(sameValue("5", 5), true);
+    assert.strictEqual(store.setValue("ConfigNet", "ConfigNet_Type", "0"), false);
+    assert.strictEqual(seen.length, 1, "no second event for an equal value");
+});
+
+test("the write is delayed, then flush forces it out and backs up", () => {
+    const dir = tempConfigDir();
+    try {
+        const file = path.join(dir, "config.json");
+        // A delay long enough that only an explicit flush can write.
+        const store = new ConfigStore({
+            path: file,
+            schema: settingsSchema.SETTINGS_SCHEMA,
+            writeDelayMs: 100000,
+        });
+        store.setValue("TaskDefaultSettings", "OrignHostThreads", "7");
+        assert.ok(!fs.existsSync(file), "the delayed write must not have happened yet");
+
+        assert.strictEqual(store.flush(), true);
+        assert.ok(fs.existsSync(file));
+        const written = JSON.parse(fs.readFileSync(file, "utf8"));
+        assert.strictEqual(written.TaskDefaultSettings.OrignHostThreads, "7");
+        // 2-space indent, as the original writes it.
+        assert.ok(fs.readFileSync(file, "utf8").includes('\n  "TaskDefaultSettings"'));
+        assert.ok(!fs.existsSync(`${file}.bak`), "no backup exists yet to copy");
+
+        store.setValue("TaskDefaultSettings", "OrignHostThreads", "9");
+        store.flush();
+        assert.ok(fs.existsSync(`${file}.bak`), "the previous file becomes the backup");
+        assert.strictEqual(JSON.parse(fs.readFileSync(`${file}.bak`, "utf8")).TaskDefaultSettings.OrignHostThreads, "7");
+        store.dispose();
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("a corrupt config.json is recovered from the backup", () => {
+    const dir = tempConfigDir();
+    try {
+        const file = path.join(dir, "config.json");
+        const store = new ConfigStore({
+            path: file,
+            schema: settingsSchema.SETTINGS_SCHEMA,
+            writeDelayMs: 100000,
+        });
+        store.setValue("TaskDefaultSettings", "OrignHostThreads", "7");
+        store.flush();
+        store.setValue("TaskDefaultSettings", "OrignHostThreads", "9");
+        store.flush();
+        store.dispose();
+
+        fs.writeFileSync(file, "{ this is not json");
+        const recovered = new ConfigStore({ path: file, schema: settingsSchema.SETTINGS_SCHEMA });
+        assert.strictEqual(
+            recovered.getValue("TaskDefaultSettings", "OrignHostThreads"),
+            "7",
+            "the backup's value must win over a broken main file"
+        );
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("the connection thread count becomes aria2's connection and split", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+    store.setValue("TaskDefaultSettings", "OrignHostThreads", "7");
+    const options = handler.engineOptions();
+    assert.strictEqual(options["max-connection-per-server"], "7");
+    assert.strictEqual(options.split, "7", "split follows the connection count or aria2 clamps it");
+});
+
+test("full speed clears the ceilings and limited sets them", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+
+    // Default is 全速 ("1"): both ceilings zero.
+    assert.strictEqual(handler.speedLimitOptions()["max-overall-download-limit"], "0");
+
+    store.setValue("ConfigNet", "ConfigNet_Type", "0");
+    store.setValue("ConfigNet", "ConfigNet_Custom_MaxDownloadSpeed", "2048");
+    store.setValue("ConfigNet", "ConfigNet_Custom_MaxUploadSpeed", "512");
+    const limited = handler.speedLimitOptions();
+    assert.strictEqual(limited["max-overall-download-limit"], "2048K");
+    assert.strictEqual(limited["max-overall-upload-limit"], "512K");
+});
+
+test("the resource cap wins over the task count when it is on", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+    store.setValue("ConfigNormalSession", "ConfigNormal_MaxRunningTaskCount", "8");
+
+    assert.strictEqual(handler.connectionLimitOptions()["max-concurrent-downloads"], "8");
+
+    store.setValue("TaskDefaultSettings", "MaxResourceLimit", true);
+    store.setValue("TaskDefaultSettings", "MaxResourceCount", "300");
+    assert.strictEqual(handler.connectionLimitOptions()["max-concurrent-downloads"], "300");
+
+    store.setValue("TaskDefaultSettings", "MaxResourceLimit", false);
+    assert.strictEqual(
+        handler.connectionLimitOptions()["max-concurrent-downloads"],
+        "8",
+        "turning the cap off restores the task-count value"
+    );
+});
+
+test("a custom proxy becomes an aria2 url, and 不使用 clears it", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+
+    assert.strictEqual(handler.proxyOptions()["all-proxy"], "");
+
+    store.setValue("ProxySetting", "ConfigProxy_Type", "2");
+    store.setValue("ConnectType", "ProxyName", "127.0.0.1:7890");
+    assert.strictEqual(handler.proxyOptions()["all-proxy"], "http://127.0.0.1:7890");
+
+    // An explicit scheme is not doubled up.
+    store.setValue("ConnectType", "ProxyName", "socks5://127.0.0.1:1080");
+    assert.strictEqual(handler.proxyOptions()["all-proxy"], "socks5://127.0.0.1:1080");
+
+    store.setValue("ProxySetting", "ConfigProxy_Type", "0");
+    assert.strictEqual(handler.proxyOptions()["all-proxy"], "");
+});
+
+test("disk cache and the BT port map to their aria2 options", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+
+    assert.strictEqual(handler.diskCacheOptions()["disk-cache"], "256M");
+    store.setValue("DiskCache", "DiskCacheSelect", "512");
+    assert.strictEqual(handler.diskCacheOptions()["disk-cache"], "512M");
+
+    assert.strictEqual(handler.btPortOptions()["listen-port"], "6881-6999");
+    store.setValue("BtGenericSettings", "ConfigBt_SetPortType", "1");
+    store.setValue("BtGenericSettings", "ConfigBt_Manul_TcpPort", "25000");
+    assert.strictEqual(handler.btPortOptions()["listen-port"], "25000");
+});
+
+test("the default folder and the completion action read back", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store });
+    assert.strictEqual(handler.defaultDownloadDir(), "");
+    assert.strictEqual(handler.openFileWhenDone(), false);
+
+    store.setValue("TaskDefaultSettings", "DefaultPath", "D:\\Downloads");
+    store.setValue("TaskDefaultSettings", "OpenFile", true);
+    assert.strictEqual(handler.defaultDownloadDir(), "D:\\Downloads");
+    assert.strictEqual(handler.openFileWhenDone(), true);
+});
+
+await testAsync("a change is pushed to the engine as one changeGlobalOption call", async () => {
+    const applied = [];
+    const engine = {
+        applyGlobalOptions: async (options) => {
+            applied.push(options);
+            return true;
+        },
+    };
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store, engine });
+    handler.attach();
+
+    store.setValue("TaskDefaultSettings", "OrignHostThreads", "7");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(
+        applied.some((o) => o["max-connection-per-server"] === "7" && o.split === "7"),
+        "the change must reach the engine"
+    );
+
+    applied.length = 0;
+    await handler.applyAll();
+    assert.strictEqual(applied.length, 1, "applyAll is one batched call");
+    assert.ok(applied[0]["max-concurrent-downloads"], "the full option set includes the task cap");
+});
+
+test("a setting change with no engine does not throw", () => {
+    const store = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    const handler = new ConfigHandler({ config: store, engine: null });
+    handler.attach();
+    assert.doesNotThrow(() => store.setValue("DiskCache", "DiskCacheSelect", "128"));
+});
+
+await testAsync("the engine applies global options over its rpc client", async () => {
+    const calls = [];
+    const engine = new Aria2Engine({ binary: "aria2c", workDir: os.tmpdir() });
+    engine._rpcReady = Promise.resolve();
+    engine.rpc = {
+        call: async (method, params) => {
+            calls.push({ method, params });
+            return "OK";
+        },
+    };
+
+    const ok = await engine.applyGlobalOptions({ "max-concurrent-downloads": 5 });
+    assert.strictEqual(ok, true);
+    assert.strictEqual(calls[0].method, "aria2.changeGlobalOption");
+    // aria2 rejects a number; every value is sent as a string.
+    assert.deepStrictEqual(calls[0].params[0], { "max-concurrent-downloads": "5" });
+
+    assert.strictEqual(await engine.applyGlobalOptions({}), false, "nothing to do");
+});
+
+test("the settings server functions and the config event are in the contract", () => {
+    const F = contract.SERVER_FUNCTIONS;
+    assert.strictEqual(F.GET_CONFIG_VALUE, "GetConfigValue");
+    assert.strictEqual(F.SET_CONFIG_VALUE, "SetConfigValue");
+    assert.strictEqual(F.SAVE_CONFIG, "SaveConfig");
+    assert.strictEqual(F.GET_SETTINGS_SCHEMA, "GetSettingsSchema");
+    assert.strictEqual(F.CREATE_SETTINGS_WINDOW, "CreateSettingsWindow");
+    // The original's own spelling, typo and all: it is compared by string.
+    assert.strictEqual(contract.NATIVE_EVENTS.ON_CONFIG_VALUE_CHANGED, "OnConfigValueChanaged");
+});
+
+test("the settings window is the size the spec asks for", () => {
+    assert.strictEqual(SETTINGS_WINDOW_OPTIONS.width, 920);
+    assert.strictEqual(SETTINGS_WINDOW_OPTIONS.height, 640);
+    assert.ok(SETTINGS_WINDOW_OPTIONS.resizable, "the form is long and must scroll or grow");
+    const service = new SettingsWindowService({ windowManager: { openWindow: () => ({}) } });
+    assert.ok(/settings[\\/]index\.html$/.test(service.page));
+});
+
+await testAsync("the settings page renders the schema and writes a change back", async () => {
+    const vm = require("vm");
+
+    const makeElement = (tag) => {
+        const el = {
+            tagName: String(tag || "div").toUpperCase(),
+            children: [],
+            _text: "",
+            className: "",
+            type: "",
+            value: "",
+            checked: false,
+            disabled: false,
+            name: "",
+            min: undefined,
+            max: undefined,
+            dataset: {},
+            style: {},
+            _listeners: {},
+            appendChild(child) {
+                this.children.push(child);
+                child.parentNode = this;
+                return child;
+            },
+            append(...kids) {
+                for (const kid of kids) this.appendChild(kid);
+            },
+            addEventListener(name, fn) {
+                (this._listeners[name] = this._listeners[name] || []).push(fn);
+            },
+            dispatch(name, event) {
+                for (const fn of this._listeners[name] || []) fn(event || {});
+            },
+        };
+        Object.defineProperty(el, "textContent", {
+            get() {
+                return this.children.length
+                    ? this.children.map((c) => c.textContent).join("")
+                    : this._text;
+            },
+            set(value) {
+                this._text = String(value);
+                this.children.length = 0;
+            },
+        });
+        const classes = new Set();
+        el.classList = {
+            add: (...names) => names.forEach((n) => classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (name, force) => {
+                const on = force === undefined ? !classes.has(name) : !!force;
+                if (on) classes.add(name);
+                else classes.delete(name);
+                return on;
+            },
+            contains: (name) => classes.has(name),
+        };
+        return el;
+    };
+
+    const byId = {};
+    for (const id of ["nav-list", "content", "save", "status"]) byId[id] = makeElement("div");
+    const documentStub = {
+        getElementById: (id) => byId[id] || null,
+        createElement: makeElement,
+    };
+
+    const calls = [];
+    const flat = { "TaskDefaultSettings-OrignHostThreads": "5" };
+    let nativeHandler = null;
+    const sandbox = { document: documentStub, console, setTimeout, clearTimeout };
+    sandbox.window = sandbox;
+    sandbox.thunderx = {
+        rpc: async (method, ...args) => {
+            calls.push({ method, args });
+            if (method === "GetSettingsSchema") {
+                return { ok: true, value: settingsSchema.annotate() };
+            }
+            if (method === "GetConfigValue") return { ok: true, value: Object.assign({}, flat) };
+            if (method === "GetUserID") return { ok: true, value: "" };
+            if (method === "SetConfigValue") {
+                flat[`${args[0]}.${args[1]}`] = args[2];
+                return { ok: true, value: true };
+            }
+            if (method === "SaveConfig") return { ok: true, value: true };
+            return { ok: true, value: null };
+        },
+        onNativeEvent: (fn) => {
+            nativeHandler = fn;
+        },
+    };
+    vm.createContext(sandbox);
+    const source = fs.readFileSync(
+        path.join(__dirname, "..", "src", "windows", "settings", "index.js"),
+        "utf8"
+    );
+    vm.runInContext(source, sandbox, { filename: "settings/index.js" });
+
+    // Let the page's async load() settle.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+    assert.strictEqual(byId["nav-list"].children.length, 8, "one nav button per category");
+    assert.strictEqual(byId["content"].children.length, 8, "one block per category");
+
+    // The first row of the first category is the 开机启动 checkbox, and it
+    // must show the stored default.
+    const firstRow = byId["content"].children[0].children[1];
+    const checkbox = firstRow.children[1].children[0];
+    assert.strictEqual(checkbox.tagName, "INPUT");
+    assert.strictEqual(checkbox.checked, true, "the schema default is on");
+
+    checkbox.checked = false;
+    checkbox.dispatch("change", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    const write = calls.find((c) => c.method === "SetConfigValue");
+    assert.ok(write, "toggling the box must write");
+    assert.deepStrictEqual(write.args, ["ConfigNormalSession", "ConfigNormal_AutoRun", false]);
+
+    byId["save"].dispatch("click", {});
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(calls.some((c) => c.method === "SaveConfig"), "the 保存 button must flush");
+
+    // A change pushed from elsewhere updates the matching control.
+    nativeHandler({
+        name: "OnConfigValueChanaged",
+        payload: { section: "ConfigNormalSession", key: "ConfigNormal_AutoRun", value: true },
+    });
+    assert.strictEqual(checkbox.checked, true, "the pushed value must land on the control");
+});
+
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exit(failed === 0 ? 0 : 1);
 })();

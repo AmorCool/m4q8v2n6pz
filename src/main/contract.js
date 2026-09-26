@@ -249,6 +249,26 @@ const SERVER_FUNCTIONS = Object.freeze({
     SET_SUSPENSION_POSITION: "SetSuspensionPosition",
     GET_SUSPENSION_CONFIG: "GetSuspensionConfig",
 
+    // --- settings (config store) ---------------------------------------------
+    //
+    // The read/write pair is the original's own: its suspension renderer calls
+    // `SetConfigValue("ConfigSuspension", "SuspensionX", ...)` and the renderer
+    // reads through `GetConfigValue` (SETTINGS_SEARCH_NOTIFY_SPEC.md section
+    // 1.2, the `Config` module). Keeping the names means a page that was
+    // written against the original reaches the same handlers.
+    //
+    // `SaveConfig` and `GetSettingsSchema` have no recovered counterpart. The
+    // original's `Config.save` is internal and its schema is a bundled
+    // constant, so a window there never had to ask for either; this build's
+    // settings window is a separate page and does.
+    GET_CONFIG_VALUE: "GetConfigValue",
+    SET_CONFIG_VALUE: "SetConfigValue",
+    SAVE_CONFIG: "SaveConfig",
+    GET_SETTINGS_SCHEMA: "GetSettingsSchema",
+    // Same convention as the new-task and pan openers: the window belongs to
+    // the main process, so a page asks for it by name.
+    CREATE_SETTINGS_WINDOW: "CreateSettingsWindow",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",
@@ -277,6 +297,13 @@ const NATIVE_EVENTS = Object.freeze({
     // rather than a second channel because it travels the same road -- see
     // electron-main's relay.
     ON_SUSPENSION_STATE: "onSuspensionState",
+    // Fired after a stored value changed, so a settings page can stay in step
+    // with a change made anywhere else. The original's spelling is preserved
+    // character for character -- `OnConfigValueChanaged` (renderer.js:74541) --
+    // because a listener that subscribed to the correct spelling would never
+    // fire against the shipped client, and a typo that is compared by string is
+    // part of the wire format rather than a mistake to fix.
+    ON_CONFIG_VALUE_CHANGED: "OnConfigValueChanaged",
 });
 
 /** Download kernel events, forwarded verbatim to the JS side. */

@@ -786,6 +786,46 @@ class Aria2Engine extends EventEmitter {
         this.globalExtInfo = info || "";
     }
 
+    /**
+     * Apply a set of aria2 global options.
+     *
+     * This is the engine half of the settings module: `ConfigHandler` decides
+     * which setting becomes which option, and this is the one call that makes
+     * them live. aria2's `changeGlobalOption` takes a single object of
+     * string-valued options and applies them to running and future tasks
+     * alike, which is exactly the original's `setStartTaskCount` /
+     * `setCacheSize` / `setProxy` behaviour expressed once.
+     *
+     * `_awaitReady` is the same wait `addTask` does: a settings change can
+     * arrive while aria2 is still opening its port (the engine is started
+     * without the app waiting for it), and failing then would silently drop
+     * the user's choice.
+     *
+     * @param {object} options  e.g. `{ "max-concurrent-downloads": "5" }`
+     * @returns {Promise<boolean>} whether aria2 accepted them
+     */
+    async applyGlobalOptions(options) {
+        const entries = options || {};
+        const keys = Object.keys(entries);
+        if (!keys.length) return false;
+
+        await this._awaitReady();
+
+        const payload = {};
+        // aria2 parses option values as strings; a number here is rejected as
+        // a type error rather than coerced, so the conversion is explicit.
+        for (const key of keys) payload[key] = String(entries[key]);
+
+        try {
+            await this.rpc.call("aria2.changeGlobalOption", [payload]);
+            this.log("global options applied:", JSON.stringify(payload));
+            return true;
+        } catch (err) {
+            this.log("changeGlobalOption failed:", err.message, JSON.stringify(payload));
+            return false;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // VIP / DCDN
     //

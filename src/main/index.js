@@ -30,6 +30,9 @@ const { PanClient, PAN_ERROR } = require("./pan");
 const { VipTokenClient } = require("./vip-token");
 const { PluginHost } = require("./plugin-host");
 const { Aria2Engine } = require("./engine-aria2");
+const { ConfigStore } = require("./config");
+const { ConfigHandler } = require("./config-handler");
+const settingsSchema = require("../renderer/settings-schema");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -215,6 +218,19 @@ class Application extends EventEmitter {
         this.pan = null;
         this.vipToken = null;
         this.pluginHost = null;
+        /*
+         * The settings store and the bridge from it to the engine.
+         *
+         * The store's path is injected rather than resolved here: a packaged
+         * app must write under `app.getPath("userData")` and this file has no
+         * `electron`. A null path keeps the store in memory, which is what a
+         * test boot and a headless run want -- nothing is written unless a
+         * caller asked for a file.
+         */
+        this.configPath = opts.configPath || null;
+        this.setLoginItem = opts.setLoginItem || (() => {});
+        this.configStore = null;
+        this.configHandler = null;
 
         this.plugins = new Map();
         // Views a plugin asked for before a renderer existed to mount them.
@@ -260,6 +276,12 @@ class Application extends EventEmitter {
         this.mesh = createMesh();
         this._registerServerFunctions();
 
+        // 1b. Settings store --------------------------------------------------
+        // Before the engine, because the engine's working directory and the
+        // default save folder are both settings, and reading them after the
+        // engine exists would mean starting with the wrong one.
+        this._createConfigStore();
+
         // 2. Kernel -----------------------------------------------------------
         // The real download engine is used when a binary is configured. With
         // neither a path nor a working binary the stub takes over, so the app
@@ -270,6 +292,11 @@ class Application extends EventEmitter {
             engine: engine || undefined,
         });
         this._wireKernelEvents();
+
+        // 2b. Settings -> engine ----------------------------------------------
+        // After the kernel, because the handler pushes options into the engine
+        // and the engine is what the kernel holds.
+        this._createConfigHandler(engine);
 
         // 3. Login ------------------------------------------------------------
         const machineId = createMachineIdProvider(this.store);
@@ -486,7 +513,80 @@ class Application extends EventEmitter {
             [F.EXTERNAL_FETCH_BACK_BY_ID]: fromPlugin(async (fileId) =>
                 this.panDownloadFile({ fileId })),
             [F.IPC_SET_RECENT_FOLDER]: fromPlugin(async (dir) => this.setRecentFolder(dir)),
+
+            /*
+             * Settings.
+             *
+             * The read/write pair is the original's `GetConfigValue` /
+             * `SetConfigValue`. `GetConfigValue` with no arguments answers the
+             * whole flat map, which is what the settings page needs to paint
+             * itself in one round trip; with a section and key it answers one
+             * value, which is the original's shape and what a plugin would
+             * call.
+             *
+             * `SetConfigValue` returns whether anything changed rather than
+             * the stored value: the store is the source of truth, and the
+             * engine action (if any) is taken by `ConfigHandler`, which is
+             * subscribed to the same store. The page therefore does not have
+             * to know which settings touch aria2.
+             */
+            [F.GET_CONFIG_VALUE]: fromPlugin(async (section, key) =>
+                this.getConfigValue(section, key)),
+            [F.SET_CONFIG_VALUE]: fromPlugin(async (section, key, value) =>
+                this.setConfigValue(section, key, value)),
+            [F.SAVE_CONFIG]: fromPlugin(async () => this.saveConfig()),
+            [F.GET_SETTINGS_SCHEMA]: fromPlugin(async () => this.getSettingsSchema()),
         });
+    }
+
+    /**
+     * Build the settings store.
+     *
+     * Defaults come from the schema, so a fresh install has every key without
+     * a file existing. With a path, the file is read and its values overlaid;
+     * without one the store is memory-only.
+     */
+    _createConfigStore() {
+        this.configStore = new ConfigStore({
+            path: this.configPath,
+            schema: settingsSchema.SETTINGS_SCHEMA,
+            log: (...a) => this.log.information("config", ...a),
+        });
+        return this.configStore;
+    }
+
+    /**
+     * Build the settings-to-engine bridge.
+     *
+     * Two listeners are attached and their order matters only in that both
+     * must be present: the handler is what turns a change into an engine
+     * action, and the second listener is what tells every window the value
+     * moved. The notification goes through the mesh rather than through a
+     * window, because the settings page may not be the only reader.
+     */
+    _createConfigHandler(engine) {
+        this.configHandler = new ConfigHandler({
+            config: this.configStore,
+            engine: engine || null,
+            setLoginItem: this.setLoginItem,
+            log: (...a) => this.log.information("config-handler", ...a),
+        });
+        this.configHandler.attach();
+
+        this.configStore.attachListener((section, key, value) => {
+            this.mesh.renderer
+                .fireServerEvent(contract.NATIVE_EVENTS.ON_CONFIG_VALUE_CHANGED, [
+                    { section, key, value },
+                ])
+                .catch((err) => this.log.warning("config event forward failed:", err.message));
+        });
+
+        // The engine is already starting, and this waits for it rather than
+        // assuming it is up; a failure is logged and the boot continues.
+        Promise.resolve(this.configHandler.applyAll()).catch((err) => {
+            this.log.warning("applying settings to the engine failed:", err.message);
+        });
+        return this.configHandler;
     }
 
     /**
@@ -538,9 +638,16 @@ class Application extends EventEmitter {
             return null;
         }
 
+        // The settings file's 下载目录 wins over the app config's, and both
+        // fall back to ~/ThunderX: a user who picked a folder in the settings
+        // window expects it to be where downloads land.
+        const settingsDir = this.configStore
+            ? this.configStore.getValue("TaskDefaultSettings", "DefaultPath", "")
+            : "";
+
         const engine = new Aria2Engine({
             binary,
-            workDir: this.config.downloadDir || path.join(os.homedir(), "ThunderX"),
+            workDir: settingsDir || this.config.downloadDir || path.join(os.homedir(), "ThunderX"),
             log: (...a) => this.log.information("aria2", ...a),
         });
 
@@ -660,6 +767,51 @@ class Application extends EventEmitter {
         const mod = defaults[moduleName];
         if (!mod || mod[key] === undefined) return [];
         return mod[key];
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings
+    // -----------------------------------------------------------------------
+
+    /**
+     * Read one setting, or all of them.
+     *
+     * The no-argument form is the page's: it needs the whole map to draw the
+     * form, and asking 75 times would be 75 round trips for one screen. The
+     * (section, key) form is the original's `Config.getValue`.
+     *
+     * With no store -- which happens only when a caller built an Application
+     * without a config path and asked anyway -- the answer is an empty map
+     * rather than an error, because "nothing is configured" is the truthful
+     * reading and a thrown error would read as a broken settings page.
+     */
+    getConfigValue(section, key) {
+        if (!this.configStore) return section ? undefined : {};
+        if (section === undefined || section === null || section === "") {
+            return this.configStore.flat();
+        }
+        return this.configStore.getValue(section, key);
+    }
+
+    /** Store one setting. @returns {boolean} whether it changed. */
+    setConfigValue(section, key, value) {
+        if (!this.configStore) return false;
+        return this.configStore.setValue(section, key, value);
+    }
+
+    /** Write the pending changes out now (the page's 保存 button). */
+    saveConfig() {
+        return this.configStore ? this.configStore.save() : false;
+    }
+
+    /**
+     * The schema the settings page renders, with `section`/`key` filled in.
+     *
+     * Annotated here rather than in the page so the "split on the first
+     * hyphen" rule has exactly one implementation.
+     */
+    getSettingsSchema() {
+        return settingsSchema.annotate();
     }
 
     /**
@@ -1331,6 +1483,11 @@ class Application extends EventEmitter {
 
     async stop() {
         if (this._anonymousTimer) clearTimeout(this._anonymousTimer);
+        // A pending settings edit is written before the process goes away; the
+        // five-second delay is a write-coalescing policy, not a reason to lose
+        // the last change on quit.
+        if (this.configHandler) this.configHandler.detach();
+        if (this.configStore) this.configStore.flush();
         this.login?.stopKeepalive();
         await this.kernel?.shutdown();
         this.emit("stopped");

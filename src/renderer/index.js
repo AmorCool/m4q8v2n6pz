@@ -777,6 +777,11 @@ function init() {
         call("CreatePanWindow");
     });
 
+    // 设置不需要登录: 下载目录、连接数、限速这些是本地偏好, 未登录也要能改.
+    document.getElementById("open-settings").addEventListener("click", () => {
+        call("CreateSettingsWindow");
+    });
+
     document.getElementById("signin").addEventListener("click", () => {
         showLogin();
         selectTab("qr");

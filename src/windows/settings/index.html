@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>设置</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!--
+        The settings centre.
+
+        Layout mirrors the original's `div.setting-center` /
+        `div.xly-setting` template (renderer.js:45337-45375): a fixed left
+        navigation and a scrolling right column, one block per category. The
+        categories themselves are not written here -- the page builds them from
+        the schema `GetSettingsSchema` returns, so a setting added to
+        `settings-schema.js` appears without touching this file.
+
+        No custom title bar: the window is framed (`frame: true`, per the
+        spec's landing table), so the OS draws the title and the close button.
+        Drawing a second one would show the title twice, which is the mistake
+        the new-task dialog avoids only because it is frameless.
+    -->
+    <header class="setting-head">
+        <h2 class="setting-head__title">设置</h2>
+        <span id="status" class="status" role="status"></span>
+        <button id="save" class="primary" type="button">保存</button>
+    </header>
+
+    <div class="setting-center">
+        <nav class="setting-nav">
+            <ul id="nav-list" class="nav-list"></ul>
+        </nav>
+        <div id="content" class="setting-content"></div>
+    </div>
+
+    <script src="index.js"></script>
+</body>
+</html>
