@@ -11,3 +11,8 @@ out/
 .DS_Store
 Thumbs.db
 config/app.local.json
+
+# The download engine binary. Fetched by scripts/fetch-engine.js rather than
+# committed: it is ~5 MB per platform, it is GPLv3 and this repository is not,
+# and it is a build artefact.
+bin/
