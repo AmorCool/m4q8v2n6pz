@@ -82,11 +82,11 @@ function authHeaders(token) {
  * it by that name.
  */
 const TARGETS = {
-    "win32-x64": { asset: /^aria2c-x64\.exe$/, name: "aria2c.exe", platform: "windows" },
-    "win32-ia32": { asset: /^aria2c-x86\.exe$/, name: "aria2c.exe", platform: "windows" },
-    "iphoneos-arm64": { asset: /^aria2c-ios-device$/, name: "aria2c", platform: "ios" },
-    "iphonesimulator-arm64": { asset: /^aria2c-ios-simulator$/, name: "aria2c", platform: "ios" },
-    "darwin-arm64": { asset: /^aria2c-ios-simulator$/, name: "aria2c", platform: "macos" },
+    "win32-x64": { asset: /^win-x64\.exe$/, name: "aria2c.exe", platform: "windows" },
+    "win32-ia32": { asset: /^win-x86\.exe$/, name: "aria2c.exe", platform: "windows" },
+    "iphoneos-arm64": { asset: /^ios-device$/, name: "aria2c", platform: "ios" },
+    "iphonesimulator-arm64": { asset: /^ios-simulator$/, name: "aria2c", platform: "ios" },
+    "darwin-arm64": { asset: /^ios-simulator$/, name: "aria2c", platform: "macos" },
 };
 
 function currentTarget() {
