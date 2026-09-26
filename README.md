@@ -30,7 +30,7 @@ config/app.json             应用配置
 
 ```bash
 npm run lint          # 语法检查
-npm test              # 77 项自检
+npm test              # 80 项自检
 npm run engine:fetch  # 拉 aria2c 到 bin/（可选，不拉就回落桩引擎）
 npm start             # 开窗口
 ```
@@ -60,7 +60,12 @@ npm run start:headless
 是为了把 GPL 留在进程边界外面，同时下载器崩了也不会带走界面。
 
 **怎么接上**：跑 `npm run engine:fetch`，它会从 `AmorCool/aria2-cross` 的
-release 资源里取对应平台的二进制放进 `bin/`。也可以手工放到下面任意一个位置。
+release 资源里取对应平台的二进制放进 `bin/`。那个仓库是私有的，所以这条命令
+需要一个 token —— 从 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量取，或者回落到
+`gh auth token`。都没有时会明说，而不是报一句"仓库还没有 release"（未认证访问
+私有仓库，GitHub 答的是 404）。
+
+也可以手工放到下面任意一个位置。
 
 ```
 bin/aria2c(.exe)                    # 仓库根下，最省事
@@ -80,14 +85,24 @@ vendor/aria2/aria2c(.exe)
 **自动认到的旗标**（需要 Turbo 构建，原版 aria2 会拒绝）：
 
 ```
---max-connection-per-server=-1   单服务器连接无上限
---split=-1
+--max-connection-per-server=16   上限由补丁解除，16 是取值不是上限
+--split=16
 --min-split-size=1K
 --retry-on-400 / --retry-on-403 / --retry-on-unknown
 ```
 
+`-1` **不能**写在这两个连接数选项上。补丁改的是选项处理器里的**上限**
+（`NumberOptionHandler(..., "1", 1, 16, 'x')` 的最后一个数字），不是让 `-1`
+变成一个合法取值 —— 传 `-1` 时 aria2 直接拒绝启动：
+
+```
+errorCode=28 max-connection-per-server must be greater than or equal to 1
+```
+
+补丁解除上限的意义是**任务可以要求更多**，引擎自己的默认不擅自加码。
+
 这些旗标来自打补丁的 aria2 源码树，见 `_aria2_x/`。自检里有一项断言旗标名
-和补丁后的选项表一致，防止哪天改了名字两边对不上。
+和补丁后的选项表一致，另一项断言取值合法。
 
 ---
 
@@ -161,11 +176,15 @@ docs/           逆向档案（格式、契约、链路）
 | Session → OAuth2 token 交换 | 完成 |
 | VIP 凭据签发（含加密） | 完成 |
 | 内核门面 + 事件转发 | 完成 |
-| 下载引擎（aria2 子进程 + Turbo 旗标） | 完成，等 CI 出二进制 |
+| 下载引擎（aria2 子进程 + Turbo 旗标） | **完成，已跑通真实下载** |
 | 任务增删改查的 RPC | 完成 |
 | 界面（窗口 + 任务表 + 插件视图宿主） | 完成 |
 | 插件宿主 | 接口就绪，插件未移植 |
 | 打包（安装包） | **未开始** |
+
+「已跑通真实下载」是指自检里那一项：起一个回环 HTTP 服务，用真实 `aria2c`
+下 512 KiB 随机数据，逐字节比对。引擎的启动、加任务、轮询、完成事件和关闭
+都在这一项里走过。没有 `bin/` 时它会明确说跳过，而不是假装测过。
 
 ---
 
@@ -174,7 +193,7 @@ docs/           逆向档案（格式、契约、链路）
 按收益排序：
 
 1. **打包**（electron-builder + NSIS）
-   界面已经能开，缺的是把它和 `bin/aria2c.exe` 装成一份可分发的产物。
+   界面能开，引擎能下，缺的是把两者和 `bin/aria2c.exe` 装成一份可分发的产物。
 2. **移植 `VipDownload` 插件**（明文未混淆，86 KB）
    它调用的是已经实现好的那几个服务端函数，视图会挂进现有的 `#views` 容器。
 3. **插件进程隔离**
