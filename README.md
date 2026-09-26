@@ -1,6 +1,6 @@
 # ThunderX Rebuild
 
-迅雷桌面客户端的复刻。当前状态：**骨架可跑，50 项自检全过**。
+迅雷桌面客户端的复刻。当前状态：**骨架可跑，75 项自检全过**。
 
 这里放的是**我们自己写的一份实现**，按原版客户端的行为契约重写。
 不包含任何原版二进制，也不包含解包后的源码副本。
@@ -15,8 +15,10 @@ src/main/rpc.js         进程内 RPC 网格（保留原版的元组约定与事
 src/main/login.js       登录三条路径 + 设备指纹 + token 交换
 src/main/vip-token.js   VIP 加速凭据签发（密钥派生 + AES-128-ECB 封包）
 src/main/kernel.js      下载内核门面（事件名与任务字段照抄）
+src/main/engine-aria2.js aria2 子进程 + JSON-RPC 驱动（见下）
+src/main/plugin-host.js 原版插件宿主（不改一行跑原版插件）
 src/main/index.js       启动编排，把上面几块接起来
-scripts/smoke.js        50 项自检
+scripts/smoke.js        75 项自检
 config/app.json         应用配置
 ```
 
@@ -24,7 +26,7 @@ config/app.json         应用配置
 
 ```bash
 npm run lint     # 语法检查
-npm test         # 50 项自检
+npm test         # 75 项自检
 npm start        # 启动
 ```
 
@@ -37,6 +39,41 @@ npm start        # 启动
 [thunderx] device sign: div101.<machineId><base64(md5)>
 [thunderx] peer id    : <40 hex>
 ```
+
+---
+
+## 下载引擎：aria2
+
+下载由 **aria2c 子进程**承担，走 JSON-RPC 驱动。用独立进程而不是链接进去，
+是为了把 GPL 留在进程边界外面，同时下载器崩了也不会带走界面。
+
+**怎么接上**：把 aria2c 放到下面任意一个位置，启动时自动认到。
+
+```
+bin/aria2c(.exe)                    # 仓库根下，最省事
+vendor/aria2/aria2c(.exe)
+<resourcesPath>/bin/aria2c(.exe)    # 打包后
+```
+
+或者写进 `config/app.json`：
+
+```json
+{ "aria2Path": "D:/tools/aria2c.exe" }
+```
+
+找不到就自动回落到内置桩引擎，应用照常启动（`npm test` 里有一项专门测这个）。
+
+**自动认到的旗标**（需要 Turbo 构建，原版 aria2 会拒绝）：
+
+```
+--max-connection-per-server=-1   单服务器连接无上限
+--split=-1
+--min-split-size=1K
+--retry-on-400 / --retry-on-403 / --retry-on-unknown
+```
+
+这些旗标来自打补丁的 aria2 源码树，见 `_aria2_x/`。自检里有一项断言旗标名
+和补丁后的选项表一致，防止哪天改了名字两边对不上。
 
 ---
 

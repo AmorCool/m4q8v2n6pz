@@ -10,6 +10,10 @@
 
     "clientId": "XW5SkOhLDjnOZP7J",
 
+    "_comment_engine": "Download engine. Leave aria2Path out and the app looks for bin/aria2c(.exe), then vendor/aria2/, then <resources>/bin/. With none of those present it falls back to a stub engine so the app still starts. downloadDir defaults to ~/ThunderX.",
+    "aria2Path": "",
+    "downloadDir": "",
+
     "_comment_endpoints": "Override only when pointing at a test environment.",
     "endpoints": {}
 }
