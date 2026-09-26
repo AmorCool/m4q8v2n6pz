@@ -15,6 +15,11 @@ jobs:
       matrix:
         node: ['18', '20', '22']
 
+    # Mapped to an environment variable because `secrets` cannot be read from an
+    # `if:` directly.
+    env:
+      ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +30,20 @@ jobs:
 
       - name: Syntax check
         run: npm run lint
+
+      # Fetch the engine, so the tests that need one are not skipped.
+      #
+      # They skip with a stated reason when bin/ is empty, and bin/ is empty
+      # here by default: the engine is built in another repository and the
+      # token this workflow receives is scoped to this one. Set ENGINE_TOKEN to
+      # a token that can read AmorCool/aria2-cross and these tests run for real
+      # -- which matters, because a stub answers to every name and hid six
+      # defects in the engine at once.
+      - name: Fetch the download engine
+        if: env.ENGINE_TOKEN != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.ENGINE_TOKEN }}
+        run: npm run engine:fetch
 
       - name: Smoke test
         run: npm test
