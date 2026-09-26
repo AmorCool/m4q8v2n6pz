@@ -39,6 +39,353 @@ body {
     height: 100%;
 }
 
+/*
+ * Screen switching.
+ *
+ * The login screen and the task UI are both in the document and one of them
+ * is hidden, rather than one being built on demand: the markup is small and
+ * a screen that is always present cannot be half-constructed when an event
+ * arrives mid-transition.
+ */
+#app.is-hidden,
+#login.is-hidden {
+    display: none;
+}
+
+/* Login ------------------------------------------------------------------- */
+
+.login {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    background: var(--bg);
+}
+
+/* 600x440 is the original login window's size. */
+.login-card {
+    display: grid;
+    grid-template-columns: 200px 400px;
+    width: 600px;
+    height: 440px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+}
+
+.login-brand {
+    position: relative;
+    padding: 32px 24px 24px;
+    border-right: 1px solid var(--line);
+    background: var(--bg);
+}
+
+.login-mark {
+    width: 96px;
+    height: 96px;
+    margin: 40px auto 0;
+    border-radius: 50%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--accent);
+    font-size: 40px;
+    font-weight: 600;
+    line-height: 96px;
+    text-align: center;
+}
+
+.login-wordmark {
+    margin-top: 20px;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: center;
+}
+
+.login-version {
+    position: absolute;
+    left: 24px;
+    bottom: 20px;
+    color: var(--text-dim);
+    font-size: 11px;
+}
+
+.login-panel {
+    display: flex;
+    flex-direction: column;
+    padding: 20px 24px;
+    min-width: 0;
+}
+
+.login-tabs {
+    display: flex;
+    gap: 18px;
+    border-bottom: 1px solid var(--line);
+}
+
+.login-tab {
+    padding: 8px 2px 10px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+.login-tab:hover {
+    color: var(--text);
+}
+
+.login-tab.is-active {
+    border-bottom-color: var(--accent);
+    color: var(--accent);
+}
+
+.login-pane {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding-top: 18px;
+}
+
+.login-pane.is-hidden {
+    display: none;
+}
+
+/* QR ---------------------------------------------------------------------- */
+
+.qr-box {
+    position: relative;
+    width: 220px;
+    height: 220px;
+    margin: 0 auto;
+    border-radius: 8px;
+    /* White plate: a QR code drawn on the dark panel would not scan. */
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.qr-image {
+    width: 100%;
+    height: 100%;
+}
+
+.qr-image.is-hidden {
+    display: none;
+}
+
+.qr-placeholder {
+    color: #8a8a95;
+    font-size: 12px;
+    text-align: center;
+    padding: 0 20px;
+}
+
+.login-hint {
+    margin: 14px 0 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+}
+
+.login-link {
+    margin-top: auto;
+    align-self: flex-end;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+}
+
+.login-link.is-static {
+    color: var(--text-dim);
+    cursor: default;
+}
+
+/* Fields ------------------------------------------------------------------ */
+
+.field {
+    display: block;
+    margin-bottom: 14px;
+}
+
+.field-label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.field-input {
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel-2);
+}
+
+.field-input:focus-within {
+    border-color: var(--accent);
+}
+
+/* The plain input matches the input inside a wrapper, so the account field
+   and the password field line up. */
+.field input[type="text"],
+.field input[type="password"],
+.field input[type="tel"] {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    user-select: text;
+}
+
+.field input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.field-input input {
+    border: 0;
+    background: transparent;
+    flex: 1;
+    min-width: 0;
+}
+
+.field-input input:focus {
+    border-color: transparent;
+}
+
+.reveal {
+    flex: none;
+    padding: 0 10px;
+    height: 34px;
+    border: 0;
+    border-left: 1px solid var(--line);
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.reveal:hover:not(:disabled) {
+    color: var(--accent);
+}
+
+.reveal:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 16px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.login-primary {
+    height: 40px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.login-primary:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.login-error {
+    margin: 10px 0 0;
+    min-height: 18px;
+    color: var(--err);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.login-foot {
+    display: flex;
+    justify-content: flex-start;
+    margin-top: auto;
+    padding-top: 10px;
+}
+
+.login-foot .login-link {
+    margin-top: 0;
+    align-self: flex-start;
+    font-size: 12px;
+}
+
+/* Account area ------------------------------------------------------------ */
+
+.account {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+#account-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.vip-badge {
+    flex: none;
+    padding: 1px 6px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    color: var(--accent);
+    font-size: 10px;
+}
+
+.vip-badge.is-hidden {
+    display: none;
+}
+
+.logout {
+    flex: none;
+    margin-left: auto;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.logout:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.logout.is-hidden {
+    display: none;
+}
+
 /* Sidebar ------------------------------------------------------------------ */
 
 #sidebar {
@@ -83,16 +430,6 @@ body {
 .filter.is-active {
     background: var(--panel-2);
     color: var(--accent);
-}
-
-.account {
-    padding: 12px 16px;
-    border-top: 1px solid var(--line);
-    color: var(--text-dim);
-    font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 /* Content ------------------------------------------------------------------ */

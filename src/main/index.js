@@ -325,6 +325,26 @@ class Application extends EventEmitter {
             [F.GET_DEVICE_ID]: fromPlugin(async () => this.login.deviceSign),
             [F.GET_LOGIN_DEVICE_ID]: fromPlugin(async () => this.login.deviceSign),
 
+            /*
+             * Login actions, called by the login screen.
+             *
+             * These are thin on purpose. Every one of them hands off to a
+             * method that already existed on the login client -- the UI is a
+             * new caller, not a new implementation. The four that have no
+             * recovered protocol answer with the gap rather than a plausible
+             * looking stub, because a stub here would sign a user in to
+             * nothing.
+             */
+            [F.LOGIN_WITH_KEY]: fromPlugin(async (credential) =>
+                this.loginWithCredential(credential)),
+            [F.REFRESH_USER_INFO]: fromPlugin(async () => this.refreshUserInfo()),
+            [F.LOGOUT]: fromPlugin(async () => this.onLogout()),
+            [F.GET_LOGIN_QRCODE]: fromPlugin(async () => this.getLoginQRCode()),
+            [F.CHECK_LOGIN_QRCODE]: fromPlugin(async (id) => this.checkLoginQRCode(id)),
+            [F.SEND_PHONE_CODE]: fromPlugin(async (phone) => this.sendPhoneCode(phone)),
+            [F.LOGIN_WITH_PHONE]: fromPlugin(async (credential) =>
+                this.loginWithPhone(credential)),
+
             // VIP / DCDN.
             //
             // Argument order is swapped here relative to the kernel: the
@@ -688,6 +708,114 @@ class Application extends EventEmitter {
     // Session transitions
     // -----------------------------------------------------------------------
 
+    /**
+     * Complete an interactive login from a credential.
+     *
+     * The credential is the tail of the web-login flow: `{loginkey, userid,
+     * usernick}`. The login client already knows how to turn that into a
+     * session; what this adds is the order the three steps have to run in.
+     * The session has to exist before the profile can be fetched, and the
+     * profile before the kernel can be told which membership to accelerate
+     * for -- so `onLoginSucceeded` sits between them rather than beside them.
+     *
+     * A missing loginkey is rejected here rather than sent on. The step that
+     * produces one from a password lives in the original's qLogin bundle,
+     * which is not part of this repository, so an empty value is a known
+     * client-side gap and not a wrong password. Reporting the two the same
+     * way would send a user hunting for a password problem that is not there.
+     */
+    async loginWithCredential(credential) {
+        const cred = credential || {};
+        if (!cred.loginkey) {
+            throw new Error(
+                "账号密码登录尚未复刻：密码换 loginkey 的步骤在 qLogin 里，" +
+                    "仓库中没有该资产"
+            );
+        }
+
+        await this.login.loginWithKey({
+            loginkey: String(cred.loginkey),
+            userid: String(cred.userid || ""),
+            usernick: String(cred.usernick || ""),
+        });
+
+        await this.onLoginSucceeded();
+
+        // Best effort, and deliberately after the login is already live. A
+        // token the account center will not issue must not roll back a session
+        // that is otherwise usable; the VIP paths report their own failure.
+        try {
+            await this.login.exchangeSessionForToken();
+        } catch (err) {
+            this.log.warning("token exchange failed:", err.message);
+        }
+
+        return {
+            ok: true,
+            userId: this.login.userId,
+            nickname: this.login.nickname,
+        };
+    }
+
+    /**
+     * Re-read the profile and report what the account area draws.
+     *
+     * A projection rather than the raw response: the renderer shows a nickname
+     * and a tier, and handing it the whole profile would make it depend on the
+     * account system's field names.
+     */
+    async refreshUserInfo() {
+        if (!(await this.login.isLogined())) {
+            return { ok: false, loggedIn: false };
+        }
+        await this.login.fetchUserInfo();
+        this._pushVipToKernel();
+        return this.userSummary();
+    }
+
+    /** The flat shape the account area renders. */
+    userSummary() {
+        const info = this.login.userInfo || {};
+        const vip = this.login.vipInfo || {};
+        return {
+            ok: true,
+            loggedIn: true,
+            userId: this.login.userId || "",
+            nickname: this.login.nickname || info.nickName || info.usernick || "",
+            isVip: !!vip.isVip,
+            vipType: vip.vipType || "",
+            vipLevel: vip.vipLevel || 0,
+        };
+    }
+
+    /*
+     * The three gaps below.
+     *
+     * Each one is a path whose server contract is known but whose client-side
+     * sequence is not: the recovered material lists the endpoints and the
+     * error codes, and stops there. They are registered so the login screen
+     * can say which piece is missing instead of a call to an unregistered
+     * name, which would come back as a bare null and read as "no such
+     * feature". The messages are the deliverable; a working implementation
+     * needs the reverse engineering, not more glue here.
+     */
+
+    getLoginQRCode() {
+        throw new Error("扫码登录尚未复刻：设备码协议（/v1/auth/device/code）未从原版还原");
+    }
+
+    checkLoginQRCode() {
+        throw new Error("扫码登录尚未复刻：没有二维码会话可供轮询");
+    }
+
+    sendPhoneCode() {
+        throw new Error("手机验证登录尚未复刻：发码请求体（/v1/auth/verification）未从原版还原");
+    }
+
+    loginWithPhone() {
+        throw new Error("手机验证登录尚未复刻：校验并登录的序列未从原版还原");
+    }
+
     /** Called after a successful interactive login. */
     async onLoginSucceeded() {
         await this.login.fetchUserInfo();
@@ -696,7 +824,7 @@ class Application extends EventEmitter {
             () => this.emit("session-expired"),
             (msg) => this.emit("session-kickout", msg)
         );
-        this.mesh.main.fireServerEvent(contract.NATIVE_EVENTS.ON_LOGIN_SUC, [
+        this._fireLoginEvent(contract.NATIVE_EVENTS.ON_LOGIN_SUC, [
             this.login.userId,
             this.login.sessionId,
         ]);
@@ -708,7 +836,22 @@ class Application extends EventEmitter {
         // acceleration immediately, before any new login arrives.
         this.kernel.setUserInfo("", "");
         this.kernel.setGlobalExtInfo("isvip=0,viptype=,viplevel=0", false);
-        this.mesh.main.fireServerEvent(contract.NATIVE_EVENTS.ON_LOGOUT, [""]);
+        this._fireLoginEvent(contract.NATIVE_EVENTS.ON_LOGOUT, [""]);
+    }
+
+    /**
+     * Deliver a login event to both audiences.
+     *
+     * They listen on different nodes and neither one forwards to the other:
+     * plugins attach to `main` (see plugin-host), and the window's renderer
+     * attaches to `renderer` (see electron-main). Firing on `main` alone
+     * reaches the plugins and leaves the account area showing a stale name,
+     * which is exactly what it did before this was split out. Both have to be
+     * addressed explicitly, so the pair lives in one place.
+     */
+    _fireLoginEvent(name, args) {
+        this.mesh.main.fireServerEvent(name, args);
+        this.mesh.renderer.fireServerEvent(name, args);
     }
 
     async stop() {

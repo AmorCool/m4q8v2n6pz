@@ -131,6 +131,23 @@ const SERVER_FUNCTIONS = Object.freeze({
     // value as GET_PEER_ID.
     GET_TP_PEER_ID: "GetTpPeerId",
 
+    // --- login (the UI's entry points) ---------------------------------------
+    //
+    // The login screen talks to the client through the same transport as a
+    // plugin, so its actions need names here rather than being hardcoded at
+    // the call site. The read-only identity functions above already existed;
+    // these are the ones that move a session, and LOGIN_WITH_KEY is the only
+    // way a credential becomes one.
+    LOGIN_WITH_KEY: "LoginWithKey",
+    REFRESH_USER_INFO: "RefreshUserInfo",
+    LOGOUT: "Logout",
+    // The QR and phone paths are named so the UI can report which protocol is
+    // missing instead of the call looking like a typo. See the handlers.
+    GET_LOGIN_QRCODE: "GetLoginQRCode",
+    CHECK_LOGIN_QRCODE: "CheckLoginQRCode",
+    SEND_PHONE_CODE: "SendPhoneCode",
+    LOGIN_WITH_PHONE: "LoginWithPhone",
+
     // --- renderer-hosted views ------------------------------------------------
     // Plugins do not create their own windows. They ask the main renderer to
     // mount a <webview> with their page in it, and read back [ok, message].

@@ -142,6 +142,18 @@ async function boot() {
      * stands in. Sending the arguments without them would silently shift every
      * real argument by two, which is the kind of failure that looks like a
      * wrong value rather than a wrong call.
+     *
+     * The tuple form is used, not `callServerFunction`, because that one
+     * unwraps a failure to `null` and a handler that threw becomes
+     * indistinguishable from one that returned nothing. The renderer needs the
+     * message: the login screen reports the account system's reason for a
+     * rejection, and a thrown service function would otherwise look like a
+     * success carrying null.
+     *
+     * The distinction is `value === null && message`: a handler that returns
+     * null without throwing is still a successful call -- which is what the
+     * task commands' void results rely on -- while a throw always carries a
+     * message.
      */
     ipcMain.handle("rpc", async (_event, method, args) => {
         const mesh = application && application.mesh && application.mesh.main;
@@ -149,12 +161,16 @@ async function boot() {
             return { ok: false, error: "not ready" };
         }
         const context = { id: "renderer" };
-        try {
-            const value = await mesh.callServerFunction(method, context, context, ...args);
-            return { ok: true, value };
-        } catch (error) {
-            return { ok: false, error: String((error && error.message) || error) };
+        const [value, message] = await mesh.callServerFunctionEx(
+            method,
+            context,
+            context,
+            ...args
+        );
+        if (value === null && message) {
+            return { ok: false, error: String(message) };
         }
+        return { ok: true, value };
     });
 
     win.once("closed", async () => {
