@@ -60,6 +60,28 @@ body {
     justify-content: center;
     height: 100%;
     background: var(--bg);
+    /* 返回按钮是绝对定位的, 相对这里. 卡片本身保持居中不动. */
+    position: relative;
+}
+
+/* 左上角的返回. 位置对齐卡片的上沿, 而不是窗口的, 这样窗口再大它也不会飘走. */
+.login-back {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    height: 30px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--fg);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.login-back:hover {
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 /* 600x440 is the original login window's size. */

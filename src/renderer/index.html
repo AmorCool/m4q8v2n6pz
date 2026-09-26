@@ -19,6 +19,10 @@
         if this ever moves into a window of its own.
     -->
     <section id="login" class="login">
+        <!-- 返回按钮. 登录页现在是主动进的, 就必须能退出去 -- 之前只能靠登录成功
+             或退出登录才离开, 未登录的人进去就出不来. 迅雷不强制登录, 所以这里
+             必须有一个"不登了, 回去下载"的出口. -->
+        <button id="login-back" class="login-back" type="button">返回</button>
         <div class="login-card">
             <!-- Brand column. The mark is a placeholder: the original's icon
                  assets are not part of this repository. -->

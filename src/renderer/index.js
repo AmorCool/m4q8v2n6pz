@@ -712,6 +712,13 @@ function init() {
         selectTab("qr");
     });
 
+    // 不登了, 回去下载. 迅雷不强制登录, 所以登录页必须能退出去 -- 否则未登录的
+    // 人进去就出不来, 这正是之前强制登录时的问题换了个样子.
+    document.getElementById("login-back").addEventListener("click", () => {
+        stopQRPolling();
+        showApp({});
+    });
+
     document.getElementById("add").addEventListener("click", async () => {
         const url = input.value.trim();
         if (!url) return;
