@@ -324,6 +324,42 @@ async function boot() {
         suspension.handleAction(action);
     });
 
+    /*
+     * The renderer's two entry points, registered before the page loads.
+     *
+     * They used to be registered after `await loadFile`, which is a race the
+     * page wins: its first calls go out around `did-finish-load`, and by then
+     * nothing was listening yet. The packaged build logged it plainly --
+     * "No handler registered for 'rpc'" and "'views:list'", three times each.
+     *
+     * What that costs is not obvious from the log. `IsLogined` is one of the
+     * calls that fails, and a failed call reads as "not signed in" -- so a
+     * signed-in user was shown the login screen on every launch. Registering
+     * first is the fix; the handlers read state that already exists by this
+     * point, so there is nothing to wait for.
+     */
+    ipcMain.handle("views:list", () => {
+        return (application.pendingWebviews || []).map(toViewDescriptor);
+    });
+
+    ipcMain.handle("rpc", async (_event, method, args) => {
+        const mesh = application && application.mesh && application.mesh.main;
+        if (!mesh) {
+            return { ok: false, error: "not ready" };
+        }
+        const context = { id: "renderer" };
+        const [value, message] = await mesh.callServerFunctionEx(
+            method,
+            context,
+            context,
+            ...args
+        );
+        if (value === null && message) {
+            return { ok: false, error: String(message) };
+        }
+        return { ok: true, value };
+    });
+
     await mainWindow.loadFile(path.join(APP_ROOT, "src", "renderer", "index.html"));
 
     // Requests made before the page existed are drained on first load. The
@@ -333,9 +369,6 @@ async function boot() {
         const views = (application.pendingWebviews || []).map(toViewDescriptor);
         mainWindow.webContents.send("views", views);
     };
-    ipcMain.handle("views:list", () => {
-        return (application.pendingWebviews || []).map(toViewDescriptor);
-    });
     mainWindow.webContents.on("did-finish-load", deliverViews);
 
     /*
@@ -437,24 +470,6 @@ async function boot() {
      * task commands' void results rely on -- while a throw always carries a
      * message.
      */
-    ipcMain.handle("rpc", async (_event, method, args) => {
-        const mesh = application && application.mesh && application.mesh.main;
-        if (!mesh) {
-            return { ok: false, error: "not ready" };
-        }
-        const context = { id: "renderer" };
-        const [value, message] = await mesh.callServerFunctionEx(
-            method,
-            context,
-            context,
-            ...args
-        );
-        if (value === null && message) {
-            return { ok: false, error: String(message) };
-        }
-        return { ok: true, value };
-    });
-
     /*
      * A window closing itself.
      *
