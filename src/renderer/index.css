@@ -687,3 +687,86 @@ tr[data-accelerated="1"] .cell-speed { color: var(--accent); }
 #views webview.is-open {
     height: 320px;
 }
+
+/* Toast (应用内浮条) ------------------------------------------------------- */
+
+/*
+ * Copied from the original's `.xly-down-bar` (main-renderer/renderer.css, quoted
+ * in SETTINGS_SEARCH_NOTIFY_SPEC.md section 3.3(2)): 368x30, bottom-left,
+ * `rgba(56,184,120,.9)` green, radius 4, z-index 9.
+ *
+ * `position: fixed` rather than the original's `absolute`: the bar lives
+ * outside `#app`, which is the scrolling container, so `fixed` is what keeps it
+ * pinned to the window corner instead of scrolling away with the task table.
+ */
+.xly-down-bar {
+    position: fixed;
+    left: 6px;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    width: 368px;
+    height: 30px;
+    color: #fff;
+    background: rgba(56, 184, 120, .9);
+    border-radius: 4px;
+    z-index: 9;
+    overflow: hidden;
+    user-select: none;
+}
+
+/*
+ * The red variant.
+ *
+ * The original binds `type: "fail"` in the component but never to a class, and
+ * its stylesheet has no red selector, so this colour is an approximation of the
+ * client's error red rather than a recovered value -- the spec flags this
+ * (section 3.6 point 1) and this is the approximation it suggests.
+ */
+.xly-down-bar.is-fail {
+    background: rgba(224, 75, 75, .9);
+}
+
+.xly-down-bar.is-hidden {
+    display: none;
+}
+
+.xly-down-bar__text {
+    flex: 1;
+    margin-right: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.xly-down-bar__option {
+    display: flex;
+    align-items: center;
+    flex: none;
+}
+
+.xly-down-bar__button {
+    width: 60px;
+    margin-right: 13px;
+    line-height: 24px;
+    color: #fff;
+    text-align: center;
+    background: rgba(239, 246, 254, .2);
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.xly-down-bar__button.is-hidden {
+    display: none;
+}
+
+.xly-down-bar__close {
+    color: hsla(0, 0%, 100%, .8);
+    cursor: pointer;
+}
+
+.xly-down-bar__close:hover {
+    color: #fff;
+}

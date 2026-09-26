@@ -20,7 +20,7 @@
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
-const { app, BrowserWindow, ipcMain, dialog, session, screen, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, session, screen, shell, clipboard, Notification } = require("electron");
 
 const { createApplication } = require("./index");
 const contract = require("./contract");
@@ -29,6 +29,8 @@ const { NewTaskService } = require("./newtask");
 const { PanWindowService } = require("./panwindow");
 const { SettingsWindowService } = require("./settingswindow");
 const { SuspensionService, WINDOW_NAME: SUSPENSION_WINDOW } = require("./suspension");
+const { SearchWindowService } = require("./searchwindow");
+const { NotificationService } = require("./notification");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -74,6 +76,19 @@ function toViewDescriptor(entry) {
         src: entry.src,
         nodeintegration: entry.nodeintegration === true || entry.nodeintegration === "true",
     };
+}
+
+/**
+ * Whether clipboard text is something a download client should offer to paste.
+ *
+ * The original's `ClipBoardNS` recognises a URL or a 口令
+ * (renderer.js:65175-65194) and raises a toast for it. The schemes below are
+ * the ones this build's engine can actually take, so a hit here is always
+ * actionable -- a toast offering "粘贴" for text that cannot be downloaded
+ * would be noise.
+ */
+function isDownloadableLink(text) {
+    return /^(magnet:|thunder:|ed2k:|https?:\/\/|ftps?:\/\/)/i.test(String(text || "").trim());
 }
 
 /*
@@ -221,6 +236,21 @@ async function boot() {
     });
 
     /*
+     * The address-bar search dropdown.
+     *
+     * Same split again, plus one twist: the panel is `focusable: false`, so the
+     * address bar keeps the keyboard and the panel only draws. The main window
+     * forwards the keyword and the arrow keys through `SearchInput` /
+     * `SearchKey`, and a pick comes back as an `onSearchCommit` event. The
+     * service wires itself to the main window (reposition on move/resize, close
+     * on blur) the first time it is opened.
+     */
+    const searchWindow = new SearchWindowService({
+        windowManager,
+        log: (...a) => console.log("[search]", ...a),
+    });
+
+    /*
      * The floating ball and its panel.
      *
      * This is the only place that knows about screens and native menus, which
@@ -355,6 +385,19 @@ async function boot() {
         [contract.SERVER_FUNCTIONS.GET_SUSPENSION_CONFIG]: fromRenderer(() =>
             suspension.getSuspensionConfig()
         ),
+        // The search dropdown's five. `SearchTask` / `SearchPanTask` are
+        // answered by the application (they need the kernel and the drive
+        // client); these are the window half.
+        [contract.SERVER_FUNCTIONS.SEARCH_INPUT]: fromRenderer((keyword, anchor) =>
+            searchWindow.input(keyword, anchor)
+        ),
+        [contract.SERVER_FUNCTIONS.SEARCH_KEY]: fromRenderer((key) => searchWindow.key(key)),
+        [contract.SERVER_FUNCTIONS.SEARCH_CLOSE]: fromRenderer(() => searchWindow.close()),
+        [contract.SERVER_FUNCTIONS.SEARCH_PICK]: fromRenderer((item) => searchWindow.pick(item)),
+        [contract.SERVER_FUNCTIONS.CREATE_SEARCH_WINDOW]: fromRenderer(() => {
+            searchWindow.open();
+            return true;
+        }),
     });
 
     /*
@@ -515,6 +558,78 @@ async function boot() {
             if (err) console.log("[settings] could not open the finished file:", err);
         });
     });
+
+    /*
+     * 系统通知.
+     *
+     * The original draws its corner popup in a dedicated window
+     * (`notification-renderer`); this build uses the OS notification instead
+     * (see notification.js for why). Two rules decide whether one is shown,
+     * and both live in the service so they can be asserted without Electron:
+     * the window must NOT be focused, and the matching 提醒 switch must be on.
+     * When the window IS focused the renderer draws the in-app toast instead.
+     */
+    const notifications = new NotificationService({
+        createNotification: (options) => {
+            // `Notification.isSupported()` is false on some Linux desktops and
+            // in a headless session; constructing one there throws.
+            if (typeof Notification !== "function" || !Notification.isSupported()) return null;
+            return new Notification({ title: options.title, body: options.body });
+        },
+        getConfig: (section, key, fallback) =>
+            application.configStore
+                ? application.configStore.getValue(section, key, fallback)
+                : fallback,
+        isWindowFocused: () => {
+            const win = windowManager.getWindow("main");
+            return Boolean(win && !win.isDestroyed() && win.isFocused());
+        },
+        log: (...a) => console.log("[notify]", ...a),
+    });
+
+    for (const name of [
+        contract.KERNEL_EVENTS.TASK_COMPLETED,
+        contract.KERNEL_EVENTS.TASK_STATUS_CHANGED,
+        contract.KERNEL_EVENTS.TASK_REMOVED,
+    ]) {
+        application.kernel.on(name, (task) => notifications.onKernelEvent(name, task));
+    }
+
+    /*
+     * 剪贴板提示.
+     *
+     * The original's `ClipBoardNS` polls the clipboard in the renderer and
+     * raises `notifyIdTaskOperatorCopyLink` when it finds a link
+     * (renderer.js:65175-65194). An isolated renderer cannot read the clipboard,
+     * so the poll is here and the hit is delivered as an event; the renderer
+     * draws the toast. `lastClipboard` makes the poll fire once per new value
+     * rather than every tick.
+     */
+    let lastClipboard = "";
+    const clipboardTimer = setInterval(() => {
+        const win = windowManager.getWindow("main");
+        if (!win || win.isDestroyed()) return;
+
+        let text = "";
+        try {
+            text = clipboard.readText() || "";
+        } catch (err) {
+            // A locked or unavailable clipboard is not worth a log line per tick.
+            return;
+        }
+        const trimmed = text.trim();
+        if (!trimmed || trimmed === lastClipboard) return;
+        lastClipboard = trimmed;
+        if (!isDownloadableLink(trimmed)) return;
+
+        const kind = /^magnet:/i.test(trimmed) ? "magnet" : "link";
+        win.webContents.send("native-event", {
+            name: contract.NATIVE_EVENTS.ON_CLIPBOARD_LINK,
+            payload: { kind, text: trimmed },
+        });
+    }, 2000);
+    if (clipboardTimer && typeof clipboardTimer.unref === "function") clipboardTimer.unref();
+    app.once("before-quit", () => clearInterval(clipboardTimer));
 
     /*
      * Renderer-initiated calls.

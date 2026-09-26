@@ -269,6 +269,28 @@ const SERVER_FUNCTIONS = Object.freeze({
     // the main process, so a page asks for it by name.
     CREATE_SETTINGS_WINDOW: "CreateSettingsWindow",
 
+    // --- search (the address-bar dropdown) ------------------------------------
+    //
+    // The original runs the address bar in the main renderer and the dropdown in
+    // a separate `search-renderer` window, and the two talk over these names
+    // (SETTINGS_SEARCH_NOTIFY_SPEC.md section 2.3). `SearchTask` and
+    // `SearchPanTask` are the original's own calls, answered here from the
+    // kernel's task list and the cloud-drive client; `SearchMovie` (online
+    // 影视联想) is deliberately absent because it needs the signed
+    // `api-shoulei-ssl.xunlei.com` backend.
+    //
+    // The remaining four have no recovered counterpart: the original's panel
+    // owned its own input and selection state, while this build's panel is
+    // driven from the address bar, so the messages between the two windows need
+    // names. They follow the `Create*Window` convention.
+    SEARCH_TASK: "SearchTask",
+    SEARCH_PAN_TASK: "SearchPanTask",
+    SEARCH_INPUT: "SearchInput",
+    SEARCH_KEY: "SearchKey",
+    SEARCH_CLOSE: "SearchClose",
+    SEARCH_PICK: "SearchPick",
+    CREATE_SEARCH_WINDOW: "CreateSearchWindow",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",
@@ -304,6 +326,19 @@ const NATIVE_EVENTS = Object.freeze({
     // fire against the shipped client, and a typo that is compared by string is
     // part of the wire format rather than a mistake to fix.
     ON_CONFIG_VALUE_CHANGED: "OnConfigValueChanaged",
+    // The search dropdown's three messages. They are addressed to the dropdown
+    // window alone (not broadcast): the main window owns the address bar and
+    // forwards the keyword and the arrow keys, and the panel answers with a
+    // commit. `ON_SEARCH_COMMIT` goes the other way -- from the panel (or the
+    // main window's Enter) to the main window, which is the only side that can
+    // act on a result.
+    ON_SEARCH_QUERY: "onSearchQuery",
+    ON_SEARCH_KEY: "onSearchKey",
+    ON_SEARCH_COMMIT: "onSearchCommit",
+    // The clipboard poll lives in the main process (`electron.clipboard` is not
+    // reachable from an isolated renderer), so the hit is delivered as an
+    // event and the renderer raises the original's 剪贴板 toast.
+    ON_CLIPBOARD_LINK: "onClipboardLink",
 });
 
 /** Download kernel events, forwarded verbatim to the JS side. */

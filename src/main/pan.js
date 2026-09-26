@@ -173,14 +173,28 @@ function buildPanHeaders(identity, extra) {
  */
 function buildListFilesRequest(identity, options) {
     const o = options || {};
+    const filters = {
+        phase: { eq: "PHASE_TYPE_COMPLETE" },
+        trashed: { eq: false },
+    };
+    /*
+     * A name filter for search.
+     *
+     * The drive's `filters` object is Google-Drive-shaped and `contains` is the
+     * documented string operator, so a search is a listing with one extra
+     * clause rather than a different endpoint. The original's `SearchPanTask`
+     * was implemented natively and its wire shape was not recovered
+     * (SETTINGS_SEARCH_NOTIFY_SPEC.md section 2.3(2) only records the call),
+     * so this is the reading that needs no invention: reuse the listing the
+     * client already makes.
+     */
+    if (o.nameContains) filters.name = { contains: String(o.nameContains) };
+
     const params = {
         parent_id: o.parentId || "",
         page_token: o.pageToken || "",
         limit: o.limit || 100,
-        filters: JSON.stringify({
-            phase: { eq: "PHASE_TYPE_COMPLETE" },
-            trashed: { eq: false },
-        }),
+        filters: JSON.stringify(filters),
         with_audit: "true",
     };
     return {
@@ -487,6 +501,30 @@ class PanClient {
     async getFileInfo(fileId, options) {
         this._requireSession();
         return this._send(buildFileInfoRequest(this._identity(), fileId, options));
+    }
+
+    /**
+     * Search the drive by file name -- the original's `SearchPanTask`.
+     *
+     * Folders are dropped: the panel's only action is "take this back to
+     * local", and a folder has no direct link. Keeping them would produce rows
+     * that fail on click, which reads as a broken search rather than as a
+     * folder.
+     *
+     * @param {string} keyword
+     * @param {object} [options] `{ limit }`
+     * @returns {Promise<object[]>} normalised, non-folder files
+     */
+    async searchFiles(keyword, options) {
+        this._requireSession();
+        const o = options || {};
+        const data = await this._send(
+            buildListFilesRequest(this._identity(), {
+                limit: o.limit || 30,
+                nameContains: keyword,
+            })
+        );
+        return parseFileList(data).files.filter((file) => !file.isFolder);
     }
 
     /** GET share/file_info. */

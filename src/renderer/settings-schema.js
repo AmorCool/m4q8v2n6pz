@@ -618,6 +618,18 @@ const SETTINGS_SCHEMA = [
                 default: true,
             },
             {
+                name: "SearchConfig-EnablePanSearch",
+                label: "地址栏搜索包含云盘文件",
+                type: "checkbox",
+                default: true,
+                // An addition of this build, and flagged as one: the original's
+                // `SearchConfigNS` module exists (renderer.js:50945) but its
+                // keys were not recovered, and the two sources this build can
+                // actually serve (local tasks, cloud drive) need a way to be
+                // turned off. Local search is always on because it is a local
+                // read; the drive half is a network call and needs a session.
+            },
+            {
                 name: "PathAndCategory-historyDownloadPaths",
                 label: "下载目录历史",
                 type: "list",

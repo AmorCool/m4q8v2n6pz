@@ -198,6 +198,7 @@ async function submitPassword() {
                 $("login-captcha-field").classList.remove("is-hidden");
             }
             error.textContent = describeLoginError(outcome.error);
+            raiseToast("login_failed", NOTIFY_TYPE.RedNotify, describeLoginError(outcome.error), 4000);
             return;
         }
         await loadSession();
@@ -395,6 +396,7 @@ async function submitPhone() {
             $("phone-captcha-field").classList.remove("is-hidden");
         }
         error.textContent = describeLoginError(outcome.error);
+        raiseToast("login_failed", NOTIFY_TYPE.RedNotify, describeLoginError(outcome.error), 4000);
         return;
     }
     await loadSession();
@@ -536,7 +538,16 @@ function createRow(taskId) {
     });
 
     rows.set(taskId, { tr, name, size, progress: text, fill, speed, status });
-    return tr;
+    // The record, not the `<tr>`.
+    //
+    // `render` looks the row up with `rows.get(taskId)` and then needs the
+    // cells as well, so returning the `<tr>` here made the two disagree: the
+    // first render got a real element from the return value, and every LATER
+    // render got this record from the map and then wrote `row.dataset.status`
+    // on it -- which threw "Cannot set properties of undefined". The task list
+    // therefore worked exactly once per task. Returning the record and reading
+    // `cells.tr` at both call sites is the fix.
+    return rows.get(taskId);
 }
 
 function visible(task) {
@@ -550,8 +561,10 @@ function render() {
 
     let shown = 0;
     for (const [taskId, task] of tasks) {
-        const row = rows.get(taskId) || createRow(taskId);
-        const cells = rows.get(taskId);
+        // `createRow` returns the same record `rows` holds, so this is the
+        // cells bundle either way and `cells.tr` is the element to write to.
+        const cells = rows.get(taskId) || createRow(taskId);
+        const row = cells.tr;
 
         const statusName = STATUS[Number(task.status)] || "waiting";
         row.dataset.status = statusName;
@@ -630,15 +643,41 @@ function handleEvent(name, payload) {
             mergeTask(payload.taskId, payload);
             if (!selected) selected = payload.taskId;
             break;
-        case "OnTaskStatusChanged":
-            mergeTask(payload.taskId, payload);
+        case "OnTaskStatusChanged": {
+            // Read the previous status BEFORE merging: a failure toast belongs
+            // to the transition into 失败, and a task that reports 失败 again
+            // on the next poll must not raise a second one.
+            const before = tasks.get(payload.taskId);
+            const merged = mergeTask(payload.taskId, payload);
+            if (
+                notifySettings.fail &&
+                Number(merged.status) === 4 &&
+                (!before || Number(before.status) !== 4)
+            ) {
+                raiseToast(
+                    "download_failed",
+                    NOTIFY_TYPE.RedNotify,
+                    `下载失败：${merged.name || merged.url || payload.taskId}`,
+                    4000
+                );
+            }
             break;
+        }
         case "OnTaskDetailChanged":
             mergeTask(payload.taskId, payload);
             break;
-        case "OnTaskCompleted":
-            mergeTask(payload.taskId, payload);
+        case "OnTaskCompleted": {
+            const merged = mergeTask(payload.taskId, payload);
+            if (notifySettings.finish) {
+                raiseToast(
+                    "download_complete",
+                    NOTIFY_TYPE.GreenNotify,
+                    `下载完成：${merged.name || merged.url || payload.taskId}`,
+                    3000
+                );
+            }
             break;
+        }
         case "OnTaskRemoved":
             tasks.delete(payload.taskId);
             if (selected === payload.taskId) selected = null;
@@ -647,10 +686,21 @@ function handleEvent(name, payload) {
             // The payload is [userId, sessionId]; the account area wants the
             // profile, so the screen is re-decided rather than read off it.
             loadSession();
+            raiseToast("login_success", NOTIFY_TYPE.GreenNotify, "登录成功", 3000);
             break;
         case "onLogout":
             // 回主界面, 不是登录页. 理由同 logout().
             showApp({});
+            break;
+        case "OnConfigValueChanaged":
+            // The original's spelling, typo and all (contract NATIVE_EVENTS).
+            if (payload) applyNotifySetting(payload.section, payload.key, payload.value);
+            break;
+        case "onSearchCommit":
+            handleSearchCommit(payload);
+            break;
+        case "onClipboardLink":
+            handleClipboardLink(payload);
             break;
         default:
             return;
@@ -710,6 +760,217 @@ async function mountQueuedViews() {
 }
 
 // ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+
+/*
+ * The manager and its view.
+ *
+ * `ToastNotifyManager` (toast.js) owns every decision -- the 13 ids, the four
+ * types, one-at-a-time, the auto-close timer and its hover pause -- and this
+ * block only paints the top item into `.xly-down-bar`. Keeping the split is
+ * what lets the manager be asserted without a DOM.
+ *
+ * The module is loaded as a plain script (see index.html), so it may be
+ * missing if the page is opened outside Electron; the manager then runs
+ * headless rather than throwing on start-up.
+ */
+const ToastNotify = window.ToastNotify || {};
+const NOTIFY_IDS = ToastNotify.NOTIFY_IDS || {};
+const NOTIFY_TYPE = ToastNotify.ToastNotifyItemType || { GreenNotify: 0, RedNotify: 1 };
+
+const toastElement = document.getElementById("toast");
+const toastText = document.getElementById("toast-text");
+const toastAction = document.getElementById("toast-action");
+
+const toastManager = new ToastNotify.ToastNotifyManager({
+    view: {
+        show(item) {
+            toastText.textContent = item.message || "";
+            const isFail =
+                item.type === NOTIFY_TYPE.RedNotify || item.type === NOTIFY_TYPE.RedCancelNotify;
+            toastElement.classList.toggle("is-fail", isFail);
+            const hasButton = Boolean(item.viewOptions && item.viewOptions.viewVisible);
+            toastAction.classList.toggle("is-hidden", !hasButton);
+            if (hasButton) toastAction.textContent = item.viewOptions.viewText || "查看";
+            toastElement.classList.remove("is-hidden");
+            // The id is left on the element so a test (and a curious user)
+            // can see which of the 13 notices is up.
+            toastElement.dataset.notifyId = item.id || "";
+        },
+        hide() {
+            toastElement.classList.add("is-hidden");
+        },
+    },
+});
+
+/**
+ * Raise a toast.
+ *
+ * @param {string} id
+ * @param {number} type  ToastNotifyItemType
+ * @param {string} message
+ * @param {number} [duration]
+ * @param {object} [viewOptions] `{ viewText, onView }` shows the 查看 button
+ */
+function raiseToast(id, type, message, duration, viewOptions) {
+    return viewOptions
+        ? toastManager.showNotifyEx(id, type, message, duration, viewOptions)
+        : toastManager.showNotify(id, type, message, duration);
+}
+
+/*
+ * Which completion notices the user wants.
+ *
+ * These are the original's own two switches for the corner popup
+ * (`ConfigMsg-ConfigMsg_Finish` / `ConfigMsg-ConfigMsg_FailSuggest`), read once
+ * and kept in step through `OnConfigValueChanaged`. When the window is in the
+ * foreground the same events are drawn as an in-app toast instead of a system
+ * notification -- the system half is decided in the main process, which is the
+ * only side that knows whether the window is focused.
+ */
+const notifySettings = { finish: true, fail: true };
+
+function applyNotifySetting(section, key, value) {
+    if (section !== "ConfigMsg") return;
+    if (key === "ConfigMsg_Finish") notifySettings.finish = value !== false && value !== "0";
+    if (key === "ConfigMsg_FailSuggest") notifySettings.fail = value !== false && value !== "0";
+}
+
+async function loadNotifySettings() {
+    const result = await callRaw("GetConfigValue");
+    if (!result.ok || !result.value) return;
+    const flat = result.value;
+    if ("ConfigMsg.ConfigMsg_Finish" in flat) {
+        notifySettings.finish = flat["ConfigMsg.ConfigMsg_Finish"] !== false;
+    }
+    if ("ConfigMsg.ConfigMsg_FailSuggest" in flat) {
+        notifySettings.fail = flat["ConfigMsg.ConfigMsg_FailSuggest"] !== false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Address-bar search
+// ---------------------------------------------------------------------------
+
+/*
+ * The address bar is the toolbar's existing link input.
+ *
+ * Typing a keyword opens the search dropdown -- a separate 460x246 borderless
+ * window (main/searchwindow.js) positioned under the input -- while the input
+ * itself keeps the keyboard focus, exactly like the original (the search
+ * window is a panel, not a focus target). Keys are therefore handled HERE and
+ * forwarded to the panel through the main process.
+ */
+const searchState = { open: false };
+
+/** Whether the typed text is a link to download rather than a search term. */
+function looksLikeLink(text) {
+    return /^(magnet:|thunder:|ed2k:|https?:\/\/|ftps?:\/\/)/i.test(String(text || "").trim());
+}
+
+/** The input's rect in the page, which the main process turns into a position. */
+function searchAnchor() {
+    const input = document.getElementById("url");
+    const rect = input.getBoundingClientRect();
+    return {
+        left: Math.round(rect.left),
+        top: Math.round(rect.bottom),
+        width: Math.round(rect.width),
+    };
+}
+
+async function searchInputChanged() {
+    const input = document.getElementById("url");
+    const keyword = input.value.trim();
+    if (!keyword || looksLikeLink(keyword)) {
+        await searchClose();
+        return;
+    }
+    searchState.open = true;
+    await call("SearchInput", keyword, searchAnchor());
+}
+
+async function searchKey(key) {
+    if (!searchState.open) return;
+    await call("SearchKey", key);
+}
+
+async function searchClose() {
+    if (!searchState.open) return;
+    searchState.open = false;
+    await call("SearchClose");
+}
+
+/*
+ * What a picked result does.
+ *
+ * The panel cannot act on the main window, so a pick travels back here as
+ * `onSearchCommit` and this is the only place that turns one into an action:
+ * a local hit selects its row, a cloud hit is taken back to local.
+ */
+async function handleSearchCommit(item) {
+    if (!item) return;
+    if (item.source === "local" && item.taskId) {
+        selected = item.taskId;
+        render();
+        const cells = rows.get(item.taskId);
+        if (cells) cells.tr.scrollIntoView({ block: "nearest" });
+        return;
+    }
+    if (item.source === "pan" && item.fileId) {
+        const outcome = await callRaw("PanDownloadFile", {
+            fileId: item.fileId,
+            name: item.name || "",
+            size: item.size || 0,
+            hash: item.hash || "",
+            mimeType: item.mimeType || "",
+        });
+        const value = outcome.ok ? outcome.value : null;
+        if (!outcome.ok || !value || value.ok === false) {
+            const message = (value && value.message) || outcome.error || "云盘请求失败";
+            raiseToast("search_pan_failed", NOTIFY_TYPE.RedNotify, `添加失败：${message}`, 4000);
+            return;
+        }
+        // The original's id for "云盘添加完成" (`task_add_to_cloud_notify`).
+        // This build has no cloud upload, so the only cloud-add it can report
+        // is a take-back to local, which is what this branch is.
+        raiseToast(
+            NOTIFY_IDS.notifyIdTaskAdd2Cloud || "task_add_to_cloud_notify",
+            NOTIFY_TYPE.GreenNotify,
+            `已添加到下载列表：${value.name || item.name || ""}`,
+            3000
+        );
+    }
+}
+
+/*
+ * Clipboard hint.
+ *
+ * The original's `ClipBoardNS` polls and raises `notifyIdTaskOperatorCopyLink`
+ * with "剪贴板有一个链接哦，去粘贴～" (renderer.js:65175-65194). Reading the
+ * clipboard needs the main process (`electron.clipboard`), so the poll lives
+ * there and arrives here as `onClipboardLink`; this only draws it.
+ */
+function handleClipboardLink(payload) {
+    const kind = (payload && payload.kind) || "link";
+    const id = kind === "magnet"
+        ? NOTIFY_IDS.notifyIdTaskOperatorCopyMagnetLink
+        : NOTIFY_IDS.notifyIdTaskOperatorCopyLink;
+    const message = kind === "magnet"
+        ? "剪贴板有一个磁力链接哦，去粘贴～"
+        : "剪贴板有一个链接哦，去粘贴～";
+    raiseToast(id || kind, NOTIFY_TYPE.GreenNotify, message, 3000, {
+        viewText: "粘贴",
+        onView: () => {
+            const input = document.getElementById("url");
+            input.value = (payload && payload.text) || "";
+            updateToolbar();
+        },
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -755,10 +1016,40 @@ function init() {
     });
 
     const input = document.getElementById("url");
-    input.addEventListener("input", updateToolbar);
-    input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") document.getElementById("add").click();
+    input.addEventListener("input", () => {
+        updateToolbar();
+        // The address bar doubles as the search box; a link being typed is not
+        // a search term, so searchInputChanged closes the panel for one.
+        searchInputChanged();
     });
+    input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            // Only while the panel is up: otherwise the arrows would move the
+            // text caret, which is what an input normally does.
+            if (searchState.open) {
+                event.preventDefault();
+                searchKey(event.key);
+            }
+            return;
+        }
+        if (event.key === "Escape") {
+            searchClose();
+            return;
+        }
+        if (event.key === "Enter") {
+            // A link is meant to be downloaded; anything else is a search.
+            // Without this split, pressing Enter on a pasted magnet would do
+            // nothing whenever the panel happened to be open.
+            if (looksLikeLink(input.value) || !searchState.open) {
+                document.getElementById("add").click();
+            } else {
+                searchKey("Enter");
+            }
+        }
+    });
+    // The panel is a separate window, so it cannot observe the input losing
+    // focus; closing on the main window's blur is the reliable equivalent.
+    window.addEventListener("blur", () => searchClose());
 
     // The cloud-drive browser. It is its own window, so this is the whole
     // wiring: ask the main process to open it. The page lists the drive
@@ -812,6 +1103,9 @@ function init() {
          */
         const opened = await call("CreatePreNewTaskWindow", { prefill: { url } });
         if (!opened) await call("CreateNewTask", { url });
+        // Setting `value` programmatically fires no `input` event, so the
+        // panel would otherwise be left open over a now-empty box.
+        searchClose();
         input.value = "";
         updateToolbar();
     });
@@ -826,12 +1120,33 @@ function init() {
         if (selected) await call("DeleteTask", selected);
     });
 
+    /*
+     * The toast bar's own three gestures.
+     *
+     * `mousemove`/`mouseout` freeze and restart the countdown
+     * (renderer.js:28005-28079). The ✕ closes the top item; the optional
+     * 查看 button runs the item's `onView` and then closes it, which is what
+     * the original's `item.cancel()` does for a RedCancel notice.
+     */
+    toastElement.addEventListener("mousemove", () => toastManager.pause());
+    toastElement.addEventListener("mouseout", () => toastManager.resume());
+    document.getElementById("toast-close").addEventListener("click", () => {
+        toastManager.closeNotify();
+    });
+    toastAction.addEventListener("click", () => {
+        const top = toastManager.getTopNotify();
+        const onView = top && top.viewOptions && top.viewOptions.onView;
+        toastManager.closeNotify();
+        if (typeof onView === "function") onView();
+    });
+
     bridge.onNativeEvent(({ name, payload }) => handleEvent(name, payload));
     bridge.onViews((views) => {
         for (const descriptor of views) mountView(descriptor);
     });
     bridge.onBootError((message) => showBanner(`启动失败: ${message}`));
 
+    loadNotifySettings();
     wireLogin();
 
     mountQueuedViews();

@@ -73,6 +73,13 @@ class WindowManager {
      * @param {boolean} [options.transparent]
      * @param {boolean} [options.alwaysOnTop]
      * @param {boolean} [options.skipTaskbar]
+     * @param {boolean} [options.focusable]     false for a panel that must not
+     *                                          steal the keyboard from the
+     *                                          window it hangs off
+     * @param {object}  [options.parent]        the BrowserWindow to hang off
+     * @param {string}  [options.title]
+     * @param {boolean} [options.inactive]      show without activating; the
+     *                                          default for a non-focusable panel
      * @param {boolean} [options.autoShow]      show on ready-to-show; default true
      * @param {object}  [options.webPreferences] merged over the safe defaults
      * @returns {object} the window
@@ -94,6 +101,7 @@ class WindowManager {
             height: opts.height,
             minWidth: opts.minWidth,
             minHeight: opts.minHeight,
+            title: opts.title,
             // `show: false` plus a ready-to-show handler is how the flash of
             // an unpainted page is avoided; the alternative is a white frame
             // that appears before the dark stylesheet is applied.
@@ -104,6 +112,15 @@ class WindowManager {
             transparent: !!opts.transparent,
             alwaysOnTop: !!opts.alwaysOnTop,
             skipTaskbar: !!opts.skipTaskbar,
+            // A panel that hangs off another window (the search dropdown) is
+            // `focusable: false`: it must receive clicks without taking the
+            // keyboard, or typing in the address bar would stop after the
+            // first character the user types over the panel.
+            focusable: opts.focusable === undefined ? true : !!opts.focusable,
+            // `parent` is a live BrowserWindow, so it is passed through only
+            // when given -- `parent: undefined` is a different call than a
+            // missing key for Electron.
+            ...(opts.parent ? { parent: opts.parent } : {}),
             webPreferences: Object.assign(
                 {
                     preload: PRELOAD,
@@ -125,7 +142,11 @@ class WindowManager {
 
         if (opts.autoShow !== false) {
             win.once("ready-to-show", () => {
-                if (!win.isDestroyed()) win.show();
+                if (win.isDestroyed()) return;
+                // `showInactive` for a panel: `show()` would activate it and
+                // pull the keyboard out of the address bar.
+                if (opts.inactive && typeof win.showInactive === "function") win.showInactive();
+                else win.show();
             });
         }
 

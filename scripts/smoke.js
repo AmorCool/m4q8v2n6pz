@@ -2817,6 +2817,718 @@ await testAsync("the settings page renders the schema and writes a change back",
     assert.strictEqual(checkbox.checked, true, "the pushed value must land on the control");
 });
 
+console.log("\nnotifications");
+
+const { MsgQueue, MSG_PRIORITY } = require("../src/renderer/msg-queue");
+const { PopMutual, POP_LIMITS } = require("../src/renderer/pop-mutual");
+const { ToastNotifyManager, ToastNotifyItemType, NOTIFY_IDS } = require("../src/renderer/toast");
+const { NotificationService, TIPS_TYPE } = require("../src/main/notification");
+
+test("msg-queue has the original's six priorities", () => {
+    assert.strictEqual(MSG_PRIORITY.Community, 0);
+    assert.strictEqual(MSG_PRIORITY.AdvertisementMarket, 1);
+    assert.strictEqual(MSG_PRIORITY.AdvertisementFunctional, 2);
+    assert.strictEqual(MSG_PRIORITY.PreciseDelivery, 3);
+    assert.strictEqual(MSG_PRIORITY.CenterVip, 4);
+    assert.strictEqual(MSG_PRIORITY.Download, 5);
+});
+
+test("msg-queue dequeues the highest priority first", () => {
+    const queue = new MsgQueue();
+    const order = [];
+    queue.enQueue({ name: "ad", priority: MSG_PRIORITY.AdvertisementMarket, callback: () => order.push("ad") });
+    queue.enQueue({ name: "dl", priority: MSG_PRIORITY.Download, callback: () => order.push("dl") });
+    queue.enQueue({ name: "community", priority: MSG_PRIORITY.Community, callback: () => order.push("community") });
+
+    // Head is the lowest priority, tail the highest -- the invariant deQueue
+    // relies on when it pops from the tail.
+    assert.strictEqual(queue.queue[0].name, "community");
+    assert.strictEqual(queue.queue[queue.queue.length - 1].name, "dl");
+
+    while (!queue.isEmpty()) queue.deQueue();
+    assert.deepStrictEqual(order, ["dl", "ad", "community"]);
+});
+
+test("msg-queue drops only the named messages", () => {
+    const queue = new MsgQueue();
+    queue.enQueue({ name: "ad", priority: MSG_PRIORITY.AdvertisementMarket });
+    queue.enQueue({ name: "dl", priority: MSG_PRIORITY.Download });
+    queue.clearQueuesByName("ad");
+    assert.strictEqual(queue.length, 1);
+    assert.strictEqual(queue.getCurrentProperty().name, "dl");
+});
+
+test("pop-mutual ranks the dialogs the way the original does", () => {
+    const pop = new PopMutual();
+    assert.strictEqual(pop.priorityOf("NEW_TASK"), 0);
+    assert.strictEqual(pop.levelFor("NEW_TASK"), "P0");
+    assert.strictEqual(pop.levelFor("SIGN"), "P2");
+    assert.strictEqual(pop.levelFor("VIP_GUIDE"), "UnKnown");
+    assert.deepStrictEqual(POP_LIMITS, { P1: 2, P2: 1, P3: 1 });
+});
+
+test("pop-mutual shows one dialog at a time", () => {
+    const pop = new PopMutual({ delayMs: 100000 });
+    const shown = [];
+    pop.popNow("LOGIN", () => shown.push("login"));
+    assert.strictEqual(pop.canAutoPopNow("NEW_TASK"), false, "a dialog is already up");
+
+    pop.enqueue("NEW_TASK", () => shown.push("new"));
+    assert.deepStrictEqual(shown, ["login"], "the second one must wait");
+
+    pop.setFinish("LOGIN");
+    pop.popNext();
+    assert.deepStrictEqual(shown, ["login", "new"]);
+    pop.dispose();
+});
+
+test("pop-mutual enforces a level ceiling and lets P0 through twice", () => {
+    const capped = new PopMutual({ delayMs: 100000 });
+    const shown = [];
+    capped.enqueue("SIGN", () => shown.push(1));   // P2, ceiling 1
+    capped.setFinish("SIGN");
+    capped.popNext();
+    assert.deepStrictEqual(shown, [1], "P2's ceiling is 1, so it does not pop twice");
+    capped.dispose();
+
+    const unlimited = new PopMutual({ delayMs: 100000 });
+    const again = [];
+    unlimited.enqueue("NEW_TASK", () => again.push(1));  // P0, no ceiling
+    unlimited.setFinish("NEW_TASK");
+    unlimited.enqueue("NEW_TASK", () => again.push(2));
+    assert.deepStrictEqual(again, [1, 2]);
+    unlimited.dispose();
+});
+
+test("toast defines the original's 13 ids and four types", () => {
+    assert.strictEqual(Object.keys(NOTIFY_IDS).length, 13);
+    assert.strictEqual(NOTIFY_IDS.notifyIdAutoDeleteNonExistTasks, "auto_delete_nonexsit_tasks");
+    assert.strictEqual(NOTIFY_IDS.notifyIdTaskOperatorCopyMagnetLink, "task_operator_copy_magnet_link");
+    assert.strictEqual(NOTIFY_IDS.notifyIdTaskAdd2Cloud, "task_add_to_cloud_notify");
+    assert.strictEqual(ToastNotifyItemType.GreenNotify, 0);
+    assert.strictEqual(ToastNotifyItemType.RedNotify, 1);
+    assert.strictEqual(ToastNotifyItemType.RedCancelNotify, 2);
+    assert.strictEqual(ToastNotifyItemType.Custom, 3);
+});
+
+test("toast shows the stack top only, and the next one after a close", () => {
+    const painted = [];
+    const manager = new ToastNotifyManager({
+        view: {
+            show: (item) => painted.push(item.message),
+            hide: () => painted.push("<hide>"),
+        },
+    });
+
+    manager.showNotify("a", ToastNotifyItemType.GreenNotify, "first", 100000);
+    manager.showNotify("b", ToastNotifyItemType.RedNotify, "second", 100000);
+    assert.strictEqual(manager.getTopNotify().message, "second");
+    assert.deepStrictEqual(painted, ["first", "second"], "one at a time");
+
+    manager.closeNotify();
+    assert.strictEqual(manager.getTopNotify().message, "first");
+    assert.deepStrictEqual(painted, ["first", "second", "first"]);
+
+    manager.closeNotify();
+    assert.strictEqual(manager.getTopNotify(), null);
+    assert.strictEqual(painted[painted.length - 1], "<hide>");
+    manager.dispose();
+});
+
+test("toast's default duration is 3000 and a repeated id updates in place", () => {
+    const manager = new ToastNotifyManager({});
+    manager.showNotify("x", ToastNotifyItemType.GreenNotify, "hi", undefined);
+    assert.strictEqual(manager.getTopNotify().duration, 3000);
+
+    manager.showNotify("p", ToastNotifyItemType.GreenNotify, "0%", 100000);
+    manager.updateNotify("p", "50%", 100000);
+    assert.strictEqual(manager.getTopNotify().message, "50%");
+    manager.showNotify("p", ToastNotifyItemType.GreenNotify, "100%", 100000);
+    assert.strictEqual(
+        manager.notifyList.filter((item) => item.id === "p").length,
+        1,
+        "same id must not stack"
+    );
+    manager.dispose();
+});
+
+test("showNotifyEx carries the 查看/取消 button", () => {
+    const manager = new ToastNotifyManager({});
+    const item = manager.showNotifyEx(
+        NOTIFY_IDS.notifyIdScheduleTaskComplete,
+        ToastNotifyItemType.RedCancelNotify,
+        "计划任务完成",
+        5000,
+        { viewText: "取消" }
+    );
+    assert.strictEqual(item.cancel, true);
+    assert.strictEqual(item.duration, 5000);
+    assert.strictEqual(item.viewOptions.viewText, "取消");
+    assert.strictEqual(item.viewOptions.viewVisible, true);
+    manager.dispose();
+});
+
+await testAsync("toast closes itself after its duration", async () => {
+    const manager = new ToastNotifyManager({});
+    manager.showNotify("x", ToastNotifyItemType.GreenNotify, "hi", 30);
+    assert.strictEqual(manager.isShowing, true);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.strictEqual(manager.isShowing, false, "the auto-close timer must fire");
+});
+
+await testAsync("toast pauses the countdown on hover and resumes it", async () => {
+    const manager = new ToastNotifyManager({});
+    manager.showNotify("x", ToastNotifyItemType.GreenNotify, "hi", 50);
+    manager.pause();
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    assert.strictEqual(manager.isShowing, true, "paused: it must not have closed");
+
+    manager.resume();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.strictEqual(manager.isShowing, false, "resumed: it closes after what was left");
+});
+
+test("the notification window's five TipsTypes are the original's", () => {
+    assert.deepStrictEqual(
+        Object.keys(TIPS_TYPE).sort(),
+        ["CommonPushTip", "CommunityTips", "ConsumptionTips", "DownloadComplete", "DownloadFail"]
+    );
+});
+
+test("a focused window gets no system notification", () => {
+    const shown = [];
+    const service = new NotificationService({
+        createNotification: (options) => {
+            shown.push(options);
+            return { show() {} };
+        },
+        isWindowFocused: () => true,
+    });
+    service.onKernelEvent(contract.KERNEL_EVENTS.TASK_COMPLETED, { taskId: "t1", name: "a.bin" });
+    assert.strictEqual(shown.length, 0, "the in-app toast covers this case");
+});
+
+test("an unfocused window gets one system notification", () => {
+    const shown = [];
+    const service = new NotificationService({
+        createNotification: (options) => {
+            shown.push(options);
+            return { show() {} };
+        },
+        isWindowFocused: () => false,
+    });
+    service.onKernelEvent(contract.KERNEL_EVENTS.TASK_COMPLETED, { taskId: "t1", name: "a.bin" });
+    assert.strictEqual(shown.length, 1);
+    assert.strictEqual(shown[0].title, "迅雷 - 下载完成");
+    assert.strictEqual(shown[0].body, "a.bin");
+});
+
+test("the 提醒 switch turns the system notification off", () => {
+    const shown = [];
+    const service = new NotificationService({
+        createNotification: (options) => {
+            shown.push(options);
+            return { show() {} };
+        },
+        isWindowFocused: () => false,
+        getConfig: (_section, key, fallback) => (key === "ConfigMsg_Finish" ? false : fallback),
+    });
+    service.onKernelEvent(contract.KERNEL_EVENTS.TASK_COMPLETED, { taskId: "t1", name: "a.bin" });
+    assert.strictEqual(shown.length, 0);
+});
+
+test("a task that keeps reporting 失败 notifies only on the transition", () => {
+    const shown = [];
+    const service = new NotificationService({
+        createNotification: (options) => {
+            shown.push(options);
+            return { show() {} };
+        },
+        isWindowFocused: () => false,
+    });
+    service.onKernelEvent(contract.KERNEL_EVENTS.TASK_STATUS_CHANGED, { taskId: "t9", status: 4, name: "x" });
+    service.onKernelEvent(contract.KERNEL_EVENTS.TASK_STATUS_CHANGED, { taskId: "t9", status: 4, name: "x" });
+    assert.strictEqual(shown.length, 1);
+    assert.strictEqual(shown[0].title, "迅雷 - 下载出错");
+});
+
+console.log("\nsearch");
+
+const { Application } = require("../src/main/index");
+const {
+    SearchWindowService,
+    WINDOW_OPTIONS: SEARCH_WINDOW_OPTIONS,
+} = require("../src/main/searchwindow");
+const panModule = require("../src/main/pan");
+
+test("the search window is the size and shape the spec asks for", () => {
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.width, 460);
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.height, 246);
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.frame, false);
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.resizable, false);
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.focusable, false, "the address bar keeps the keyboard");
+    assert.strictEqual(SEARCH_WINDOW_OPTIONS.skipTaskbar, true);
+});
+
+test("the search server functions are in the contract", () => {
+    const F = contract.SERVER_FUNCTIONS;
+    assert.strictEqual(F.SEARCH_TASK, "SearchTask");
+    assert.strictEqual(F.SEARCH_PAN_TASK, "SearchPanTask");
+    assert.strictEqual(F.SEARCH_INPUT, "SearchInput");
+    assert.strictEqual(F.SEARCH_PICK, "SearchPick");
+    assert.strictEqual(contract.NATIVE_EVENTS.ON_SEARCH_QUERY, "onSearchQuery");
+    assert.strictEqual(contract.NATIVE_EVENTS.ON_SEARCH_COMMIT, "onSearchCommit");
+    assert.strictEqual(contract.NATIVE_EVENTS.ON_CLIPBOARD_LINK, "onClipboardLink");
+});
+
+test("SearchTask matches name and url, ranking 正在下载 above 已完成", () => {
+    const app = new Application({ config: { clientVersion: "1.0.0.1" } });
+    app.kernel = new ThunderKernel({ engine: createNullEngine() });
+    app.kernel.tasks.set("t1", { taskId: "t1", name: "ubuntu-24.04.iso", url: "https://x/ubuntu", status: 3 });
+    app.kernel.tasks.set("t2", { taskId: "t2", name: "Ubuntu Server", url: "https://y/u", status: 1 });
+    app.kernel.tasks.set("t3", { taskId: "t3", name: "other", url: "https://z/", status: 0 });
+
+    const hits = app.searchTasks("ubuntu");
+    assert.deepStrictEqual(hits.map((h) => h.taskId), ["t2", "t1"]);
+    assert.strictEqual(hits[0].name, "Ubuntu Server");
+    // An empty keyword is not a search; nothing matches.
+    assert.strictEqual(app.searchTasks("").length, 0);
+    assert.strictEqual(app.searchTasks("nothing").length, 0);
+    // The URL is matched too, not just the name.
+    assert.deepStrictEqual(app.searchTasks("https://z/").map((h) => h.taskId), ["t3"]);
+});
+
+test("the drive search is a listing with a name filter", () => {
+    const identity = {
+        baseUrl: "https://api-pan.xunlei.com/drive/v1/",
+        peerId: "p",
+        numericVersion: "2662",
+        deviceId: "d",
+    };
+    const request = panModule.buildListFilesRequest(identity, { limit: 30, nameContains: "电影" });
+    const query = decodeURIComponent(request.url.split("?")[1]);
+    assert.ok(query.includes('"name":{"contains":"电影"}'), query);
+    assert.ok(query.includes('"phase":{"eq":"PHASE_TYPE_COMPLETE"}'), query);
+    assert.ok(query.includes("limit=30"), query);
+
+    // Without a keyword the filter is absent, so a plain listing is unchanged.
+    const plain = panModule.buildListFilesRequest(identity, {});
+    assert.ok(!decodeURIComponent(plain.url).includes('"name"'));
+});
+
+await testAsync("the drive search needs a session and drops folders", async () => {
+    const signedOut = new panModule.PanClient({
+        getSession: () => ({}),
+        request: async () => ({ status: 200, data: {} }),
+    });
+    await assert.rejects(
+        () => signedOut.searchFiles("x"),
+        (err) => err.code === "not_logged_in"
+    );
+
+    const signedIn = new panModule.PanClient({
+        getSession: () => ({ sessionId: "s", peerId: "p", deviceId: "d", numericVersion: "1" }),
+        request: async () => ({
+            status: 200,
+            data: {
+                files: [
+                    { id: "f1", name: "movie.mkv", kind: "drive#file", size: "100", mime_type: "video/x" },
+                    { id: "d1", name: "movies", kind: "drive#folder" },
+                ],
+            },
+        }),
+    });
+    const files = await signedIn.searchFiles("movie");
+    assert.strictEqual(files.length, 1, "a folder has no direct link and is dropped");
+    assert.strictEqual(files[0].id, "f1");
+    assert.strictEqual(files[0].size, 100, "the size arrives as a string and is converted");
+});
+
+await testAsync("SearchPanTask answers not_logged_in instead of an empty list", async () => {
+    const app = new Application({ config: { clientVersion: "1.0.0.1" } });
+    app.pan = new panModule.PanClient({
+        getSession: () => ({}),
+        request: async () => ({ status: 200, data: {} }),
+    });
+    const result = await app.searchPanTasks("movie");
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.code, "not_logged_in");
+});
+
+await testAsync("SearchPanTask is off when the schema switch is off", async () => {
+    const app = new Application({ config: { clientVersion: "1.0.0.1" } });
+    app.configStore = new ConfigStore({ schema: settingsSchema.SETTINGS_SCHEMA });
+    app.pan = new panModule.PanClient({
+        getSession: () => ({ sessionId: "s" }),
+        request: async () => {
+            throw new Error("the drive must not be called when the switch is off");
+        },
+    });
+    app.configStore.setValue("SearchConfig", "EnablePanSearch", false);
+    assert.deepStrictEqual(await app.searchPanTasks("movie"), { ok: true, files: [] });
+});
+
+test("the search panel is positioned under the address bar", () => {
+    const moved = [];
+    const panel = {
+        isDestroyed: () => false,
+        isVisible: () => true,
+        setPosition: (x, y) => moved.push([x, y]),
+        webContents: { send() {} },
+    };
+    const main = { getContentBounds: () => ({ x: 100, y: 200, width: 1100, height: 720 }) };
+    const windowManager = {
+        openWindow: () => panel,
+        getWindow: (name) => (name === "main" ? main : panel),
+        close: () => {},
+    };
+    const service = new SearchWindowService({ windowManager });
+    service.position({ left: 192, top: 44 });
+    assert.deepStrictEqual(moved[0], [292, 244], "content origin + the input's rect");
+});
+
+test("SearchInput opens the panel and forwards the keyword; empty closes it", () => {
+    const sent = [];
+    const closed = [];
+    const panel = {
+        isDestroyed: () => false,
+        __searchReady: true,
+        __searchLoading: true,
+        isVisible: () => true,
+        showInactive() {},
+        webContents: { send: (_channel, payload) => sent.push(payload), once() {} },
+    };
+    const windowManager = {
+        openWindow: () => panel,
+        getWindow: (name) => (name === "main" ? null : panel),
+        close: (name) => closed.push(name),
+    };
+    const service = new SearchWindowService({ windowManager });
+
+    service.input("ubuntu", { left: 10, top: 20 });
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].name, "onSearchQuery");
+    assert.deepStrictEqual(sent[0].payload, { keyword: "ubuntu" });
+
+    service.key("ArrowDown");
+    assert.strictEqual(sent[1].name, "onSearchKey");
+    assert.deepStrictEqual(sent[1].payload, { key: "ArrowDown" });
+
+    service.input("   ");
+    assert.deepStrictEqual(closed, ["search"], "an empty keyword closes the panel");
+});
+
+test("a picked result is forwarded to the main window as a commit", () => {
+    const sent = [];
+    const main = { isDestroyed: () => false, webContents: { send: (_channel, payload) => sent.push(payload) } };
+    const windowManager = {
+        openWindow: () => ({}),
+        getWindow: (name) => (name === "main" ? main : null),
+        close: () => {},
+    };
+    const service = new SearchWindowService({ windowManager });
+    service.pick({ source: "pan", fileId: "f1", name: "movie.mkv" });
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].name, "onSearchCommit");
+    assert.strictEqual(sent[0].payload.fileId, "f1");
+});
+
+await testAsync("the search page groups the hits and moves the highlight", async () => {
+    const vm = require("vm");
+
+    const makeText = (value) => {
+        const node = { _text: String(value), children: [] };
+        Object.defineProperty(node, "textContent", {
+            get() { return this._text; },
+            set(v) { this._text = String(v); },
+        });
+        return node;
+    };
+
+    const makeElement = (tag) => {
+        const el = {
+            tagName: String(tag || "div").toUpperCase(),
+            children: [],
+            _text: "",
+            title: "",
+            dataset: {},
+            _listeners: {},
+            appendChild(child) {
+                this.children.push(child);
+                child.parentNode = this;
+                return child;
+            },
+            append(...kids) {
+                for (const kid of kids) this.appendChild(kid);
+            },
+            addEventListener(name, fn) {
+                (this._listeners[name] = this._listeners[name] || []).push(fn);
+            },
+            dispatch(name, event) {
+                for (const fn of this._listeners[name] || []) fn(event || {});
+            },
+            scrollIntoView() {
+                this.scrolled = true;
+            },
+        };
+        Object.defineProperty(el, "textContent", {
+            get() {
+                return this.children.length
+                    ? this.children.map((c) => c.textContent).join("")
+                    : this._text;
+            },
+            set(value) {
+                this._text = String(value);
+                this.children.length = 0;
+            },
+        });
+        const classes = new Set();
+        el.classList = {
+            add: (...names) => names.forEach((n) => classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (name, force) => {
+                const on = force === undefined ? !classes.has(name) : !!force;
+                if (on) classes.add(name);
+                else classes.delete(name);
+                return on;
+            },
+            contains: (name) => classes.has(name),
+        };
+        Object.defineProperty(el, "className", {
+            get() { return Array.from(classes).join(" "); },
+            set(value) {
+                classes.clear();
+                String(value).split(/\s+/).filter(Boolean).forEach((n) => classes.add(n));
+            },
+        });
+        el.querySelectorAll = (selector) => {
+            const want = selector.replace(/^\./, "");
+            const out = [];
+            const walk = (node) => {
+                for (const child of node.children) {
+                    if (child.classList && child.classList.contains(want)) out.push(child);
+                    if (child.children) walk(child);
+                }
+            };
+            walk(el);
+            return out;
+        };
+        el.querySelector = (selector) => {
+            const parts = selector.split(".").filter(Boolean);
+            const out = [];
+            const walk = (node) => {
+                for (const child of node.children) {
+                    if (child.classList && parts.every((p) => child.classList.contains(p))) out.push(child);
+                    if (child.children) walk(child);
+                }
+            };
+            walk(el);
+            return out[0] || null;
+        };
+        return el;
+    };
+
+    const byId = {
+        sections: makeElement("div"),
+        loading: makeElement("div"),
+        empty: makeElement("div"),
+    };
+    const documentStub = {
+        getElementById: (id) => byId[id] || null,
+        createElement: makeElement,
+        createTextNode: makeText,
+        createDocumentFragment: () => makeElement("fragment"),
+    };
+
+    const calls = [];
+    let nativeHandler = null;
+    const sandbox = { document: documentStub, console, setTimeout, clearTimeout };
+    sandbox.window = sandbox;
+    sandbox.thunderx = {
+        rpc: async (method, ...args) => {
+            calls.push({ method, args });
+            if (method === "SearchTask") {
+                return { ok: true, value: [
+                    { taskId: "t1", name: "ubuntu-24.04.iso", url: "https://x", status: 1, totalSize: 0 },
+                ] };
+            }
+            if (method === "SearchPanTask") {
+                return { ok: true, value: { ok: true, files: [
+                    { id: "f1", name: "ubuntu notes.txt", size: 1024 },
+                ] } };
+            }
+            return { ok: true, value: null };
+        },
+        onNativeEvent: (fn) => {
+            nativeHandler = fn;
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        fs.readFileSync(path.join(__dirname, "..", "src", "windows", "search", "index.js"), "utf8"),
+        sandbox,
+        { filename: "search/index.js" }
+    );
+
+    nativeHandler({ name: "onSearchQuery", payload: { keyword: "ubuntu" } });
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = byId["sections"].querySelectorAll(".row");
+    assert.strictEqual(rows.length, 2, "one local row and one cloud row");
+    assert.ok(byId["sections"].textContent.includes("本地任务"));
+    assert.ok(byId["sections"].textContent.includes("云盘文件"));
+    assert.ok(rows[0].classList.contains("is-selected"), "the first row starts selected");
+
+    nativeHandler({ name: "onSearchKey", payload: { key: "ArrowDown" } });
+    assert.ok(rows[1].classList.contains("is-selected"));
+    assert.ok(!rows[0].classList.contains("is-selected"));
+
+    nativeHandler({ name: "onSearchKey", payload: { key: "Enter" } });
+    for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    const picked = calls.find((call) => call.method === "SearchPick");
+    assert.ok(picked, "Enter must pick the highlighted row");
+    assert.strictEqual(picked.args[0].source, "pan");
+    assert.strictEqual(picked.args[0].fileId, "f1");
+});
+
+await testAsync("the main renderer redraws a task twice and raises a toast", async () => {
+    const vm = require("vm");
+    const toastModule = require("../src/renderer/toast");
+
+    const makeElement = (tag) => {
+        const el = {
+            tagName: String(tag || "div").toUpperCase(),
+            children: [],
+            _text: "",
+            title: "",
+            value: "",
+            disabled: false,
+            checked: false,
+            type: "",
+            dataset: {},
+            style: {},
+            _listeners: {},
+            appendChild(child) {
+                this.children.push(child);
+                child.parentNode = this;
+                return child;
+            },
+            append(...kids) {
+                for (const kid of kids) this.appendChild(kid);
+            },
+            addEventListener(name, fn) {
+                (this._listeners[name] = this._listeners[name] || []).push(fn);
+            },
+            dispatch(name, event) {
+                for (const fn of this._listeners[name] || []) fn(event || {});
+            },
+        };
+        Object.defineProperty(el, "textContent", {
+            get() {
+                return this.children.length
+                    ? this.children.map((c) => c.textContent).join("")
+                    : this._text;
+            },
+            set(value) {
+                this._text = String(value);
+                this.children.length = 0;
+            },
+        });
+        const classes = new Set();
+        el.classList = {
+            add: (...names) => names.forEach((n) => classes.add(n)),
+            remove: (...names) => names.forEach((n) => classes.delete(n)),
+            toggle: (name, force) => {
+                const on = force === undefined ? !classes.has(name) : !!force;
+                if (on) classes.add(name);
+                else classes.delete(name);
+                return on;
+            },
+            contains: (name) => classes.has(name),
+        };
+        return el;
+    };
+
+    const byId = {};
+    const documentStub = {
+        getElementById: (id) => {
+            // Lazily created so an id the page touches but this test does not
+            // care about still behaves like an element.
+            if (!byId[id]) byId[id] = makeElement("div");
+            return byId[id];
+        },
+        createElement: makeElement,
+        querySelectorAll: () => [],
+        createTextNode: (value) => ({ textContent: String(value), children: [] }),
+        createDocumentFragment: () => makeElement("fragment"),
+    };
+
+    let nativeHandler = null;
+    const sandbox = {
+        document: documentStub,
+        console,
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+        addEventListener: () => {},
+    };
+    sandbox.window = sandbox;
+    sandbox.ToastNotify = toastModule;
+    sandbox.thunderx = {
+        rpc: async (method) => {
+            if (method === "IsLogined") return { ok: true, value: false };
+            if (method === "GetThunderVersion") return { ok: true, value: "12.1.2.2662" };
+            if (method === "GetConfigValue") return { ok: true, value: {} };
+            // A failed QR fetch, so the page does not start a poll interval.
+            if (method === "GetLoginQRCode") return { ok: false, error: "no network" };
+            return { ok: true, value: null };
+        },
+        listViews: async () => [],
+        onNativeEvent: (fn) => {
+            nativeHandler = fn;
+        },
+        onViews: () => {},
+        onBootError: () => {},
+    };
+
+    vm.createContext(sandbox);
+    vm.runInContext(
+        fs.readFileSync(path.join(__dirname, "..", "src", "renderer", "index.js"), "utf8"),
+        sandbox,
+        { filename: "renderer/index.js" }
+    );
+    for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(nativeHandler, "the page must subscribe to native events");
+
+    // First render: the row is created.
+    nativeHandler({ name: "OnTaskInserted", payload: { taskId: "a", name: "a.bin", status: 0 } });
+    assert.strictEqual(byId["tasks-body"].children.length, 1);
+
+    // Second render of the same task. This used to throw
+    // "Cannot set properties of undefined (setting 'status')" because `render`
+    // read the cells record out of the map and then treated it as the <tr>.
+    nativeHandler({ name: "OnTaskDetailChanged", payload: { taskId: "a", completedSize: 5 } });
+    assert.strictEqual(byId["tasks-body"].children.length, 1, "the row is reused, not duplicated");
+
+    // A completion raises the green toast through the page's own wiring.
+    nativeHandler({ name: "OnTaskCompleted", payload: { taskId: "a", name: "a.bin", status: 3 } });
+    assert.ok(!byId["toast"].classList.contains("is-hidden"), "the toast bar must be shown");
+    assert.strictEqual(byId["toast-text"]._text, "下载完成：a.bin");
+    assert.strictEqual(byId["toast"].dataset.notifyId, "download_complete");
+    assert.ok(!byId["toast"].classList.contains("is-fail"));
+
+    // A failure on another task raises the red variant.
+    nativeHandler({ name: "OnTaskStatusChanged", payload: { taskId: "b", name: "b.bin", status: 4 } });
+    assert.ok(byId["toast"].classList.contains("is-fail"));
+    assert.strictEqual(byId["toast-text"]._text, "下载失败：b.bin");
+
+    // A repeat of the same failure is not a transition and must not re-toast.
+    byId["toast"].classList.add("is-hidden");
+    nativeHandler({ name: "OnTaskStatusChanged", payload: { taskId: "b", name: "b.bin", status: 4 } });
+    assert.ok(byId["toast"].classList.contains("is-hidden"), "no second toast for the same failure");
+});
+
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exit(failed === 0 ? 0 : 1);
 })();

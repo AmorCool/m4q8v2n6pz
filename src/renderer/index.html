@@ -178,6 +178,38 @@
         </main>
     </div>
 
+    <!--
+        Toast (应用内浮条).
+
+        The original's `.xly-down-bar` component (renderer.js:45508-45542, CSS
+        in main-renderer/renderer.css). It sits OUTSIDE `#app` on purpose: it
+        belongs to the window, not to a screen, so a notice raised on the login
+        screen is not unmounted when the task list replaces it. Position, size
+        and colours are copied from the original's stylesheet.
+
+        The close mark is a text glyph rather than the original's icon font
+        (`td-icon-close`): the font is not part of this repository, and a bar
+        with no way to dismiss it would be worse than an approximate glyph.
+    -->
+    <div id="toast" class="xly-down-bar is-hidden">
+        <p id="toast-text" class="xly-down-bar__text"></p>
+        <div class="xly-down-bar__option">
+            <a id="toast-action" class="xly-down-bar__button is-hidden"
+               role="button" tabindex="0">查看</a>
+            <a id="toast-close" class="xly-down-bar__close" role="button"
+               tabindex="0" title="关闭">✕</a>
+        </div>
+    </div>
+
+    <!--
+        The three notification modules load before the page script because the
+        page builds its managers from them at start-up. They are plain scripts
+        rather than modules so that the same files can be `require`d by the
+        test suite (see the dual-mode footer in each).
+    -->
+    <script src="msg-queue.js"></script>
+    <script src="pop-mutual.js"></script>
+    <script src="toast.js"></script>
     <script src="index.js"></script>
 </body>
 </html>

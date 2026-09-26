@@ -536,6 +536,23 @@ class Application extends EventEmitter {
                 this.setConfigValue(section, key, value)),
             [F.SAVE_CONFIG]: fromPlugin(async () => this.saveConfig()),
             [F.GET_SETTINGS_SCHEMA]: fromPlugin(async () => this.getSettingsSchema()),
+
+            /*
+             * Search.
+             *
+             * `SearchTask` and `SearchPanTask` are the original's own names
+             * (SETTINGS_SEARCH_NOTIFY_SPEC.md section 2.3(2)), called by the
+             * dropdown page. Local search reads the kernel's task list, which
+             * is where the downloader's own records live; the cloud half goes
+             * through the drive client, which is why it can answer
+             * `not_logged_in` rather than an empty list.
+             *
+             * `SearchMovie` is not registered: it needs the signed
+             * `api-shoulei-ssl.xunlei.com` endpoint, and a stub returning `[]`
+             * would look like "no results" instead of "not supported".
+             */
+            [F.SEARCH_TASK]: fromPlugin(async (keyword) => this.searchTasks(keyword)),
+            [F.SEARCH_PAN_TASK]: fromPlugin(async (keyword) => this.searchPanTasks(keyword)),
         });
     }
 
@@ -812,6 +829,95 @@ class Application extends EventEmitter {
      */
     getSettingsSchema() {
         return settingsSchema.annotate();
+    }
+
+    // -----------------------------------------------------------------------
+    // Search
+    // -----------------------------------------------------------------------
+
+    /**
+     * Local task search -- the original's `SearchTask`.
+     *
+     * The original implements this natively (inside `ThunderHelper.node`) and
+     * the recovered material does not record its matching rule
+     * (SETTINGS_SEARCH_NOTIFY_SPEC.md section 2.6 point 3), so this is the
+     * reading the spec suggests: a case-insensitive substring match on the
+     * display name and on the URL.
+     *
+     * Ordering is the other half of that suggestion: "正在下载" before
+     * "已完成", then everything else. Ties keep the kernel's own order, which
+     * is insertion order, so a search does not shuffle the list between
+     * keystrokes.
+     *
+     * @param {string} keyword
+     * @returns {object[]} at most 30 hits, projected to what the panel draws
+     */
+    searchTasks(keyword) {
+        const needle = String(keyword === undefined || keyword === null ? "" : keyword)
+            .trim()
+            .toLowerCase();
+        if (!needle || !this.kernel) return [];
+
+        const rank = (status) => {
+            const n = Number(status);
+            if (n === 1) return 0;   // 正在下载
+            if (n === 3) return 1;   // 已完成
+            return 2;
+        };
+
+        const hits = [];
+        for (const task of this.kernel.getAllTasks()) {
+            const name = String(task.name || task.btTitle || "");
+            const url = String(task.url || "");
+            if (!name.toLowerCase().includes(needle) && !url.toLowerCase().includes(needle)) {
+                continue;
+            }
+            hits.push({
+                taskId: task.taskId,
+                name: name || url || task.taskId,
+                url,
+                status: Number(task.status),
+                totalSize: Number(task.totalSize) || 0,
+                completedSize: Number(task.completedSize) || 0,
+            });
+        }
+
+        // A stable sort by rank: the comparator only orders the three buckets,
+        // so tasks inside one bucket stay in the kernel's order.
+        return hits
+            .map((hit, index) => ({ hit, index }))
+            .sort((a, b) => rank(a.hit.status) - rank(b.hit.status) || a.index - b.index)
+            .map((entry) => entry.hit)
+            .slice(0, 30);
+    }
+
+    /**
+     * Cloud-drive file search -- the original's `SearchPanTask`.
+     *
+     * A signed-out user gets `not_logged_in` rather than an empty list: an
+     * empty list reads as "no such file", and the two mean different things to
+     * the panel ("sign in first" vs "nothing matched").
+     *
+     * @returns {Promise<object>} `{ ok, files }` or `{ ok:false, code, message }`
+     */
+    async searchPanTasks(keyword) {
+        const needle = String(keyword === undefined || keyword === null ? "" : keyword).trim();
+        if (!needle) return { ok: true, files: [] };
+        // `SearchConfig-EnablePanSearch` is this build's own switch (see the
+        // schema): the drive half is a network call, so a user who does not
+        // want search reaching the network can turn it off. Off answers the
+        // same as "nothing matched", which is what the panel draws.
+        const enabled = this.configStore
+            ? this.configStore.getValue("SearchConfig", "EnablePanSearch", true)
+            : true;
+        if (enabled === false || enabled === "0") return { ok: true, files: [] };
+        if (!this.pan) return { ok: false, code: PAN_ERROR.NETWORK, message: "云盘不可用" };
+        try {
+            const files = await this.pan.searchFiles(needle, { limit: 30 });
+            return { ok: true, files };
+        } catch (err) {
+            return this._panFailure(err);
+        }
     }
 
     /**
