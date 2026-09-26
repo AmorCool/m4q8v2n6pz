@@ -1,19 +1,6 @@
-node_modules/
-*.log
-boot.log
-boot.err
-.env
-.env.*
-dist/
-build/
-out/
-*.tsbuildinfo
-.DS_Store
-Thumbs.db
-config/app.local.json
-
-# The download engine binary. Fetched by scripts/fetch-engine.js rather than
-# committed: it is ~5 MB per platform, it is GPLv3 and this repository is not,
-# and it is a build artefact.
-bin/*
-!bin/README.md
+# 本地文档不进仓库.
+#
+# docs/ 下是逆向分析档案, README 是构建与设计笔记. 内容本身不涉密, 但全是可检索的
+# 关键词 (模块名, 接口名, 协议细节, 排障记录), 仓库一旦公开就会被爬虫命中.
+# 文件本身留在本地磁盘上, 只是不跟着 git 走.
+*.md
