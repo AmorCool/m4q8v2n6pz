@@ -123,6 +123,18 @@ const SERVER_FUNCTIONS = Object.freeze({
     GET_LOGIN_DEVICE_ID: "GetLoginDeviceID",
     GET_USER_INFO: "GetUserInfo",
     GET_THUNDER_VERSION: "GetThunderVersion",
+    // The plugin calls this before it can build any xbase request; it is the
+    // one call that has no sensible fallback, because it carries the OAuth2
+    // client credentials.
+    GET_INIT_USER_LOGIN_PARAM: "GetInitUserLoginParam",
+    // ThunderPanPlugin wants a peer id of its own; it resolves to the same
+    // value as GET_PEER_ID.
+    GET_TP_PEER_ID: "GetTpPeerId",
+
+    // --- renderer-hosted views ------------------------------------------------
+    // Plugins do not create their own windows. They ask the main renderer to
+    // mount a <webview> with their page in it, and read back [ok, message].
+    CREATE_WEBVIEW: "CreateWebview",
 
     // --- registration -------------------------------------------------------
     REGISTER_WEB_EXTERNAL: "RegisterWebExternal",

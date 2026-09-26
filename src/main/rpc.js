@@ -164,22 +164,48 @@ class RpcNode extends EventEmitter {
     }
 
     /**
-     * Call a function on the server side. Falls back to a locally registered
-     * function of the same name when no server node is attached, which is how
-     * a plugin behaves when it runs in-process.
+     * Call a function on the server side and return the bare value.
+     *
+     * The shipped client is literally:
+     *
+     *     callServerFunction(e, ...t) {
+     *         let n = null, r = yield this.callServerFunctionEx(e, ...t);
+     *         return r && (n = r[0]), n;
+     *     }
+     *
+     * so this unwraps and `callServerFunctionEx` is the one that keeps the
+     * tuple. Getting that backwards silently turns a string into its first
+     * character, which is why both forms are implemented.
+     *
+     * Falls back to a locally registered function of the same name when no
+     * server node has one, which is how a plugin behaves when it runs
+     * in-process.
      */
     async callServerFunction(method, ...args) {
+        const tuple = await this.callServerFunctionEx(method, ...args);
+        return tuple && tuple[0];
+    }
+
+    /**
+     * Same as callServerFunction but resolves to `[value, undefined]` or
+     * `[null, message]`, matching the transport's reply shape.
+     */
+    async callServerFunctionEx(method, ...args) {
         if (this.server && this.server.apis.has(method)) {
             try {
-                return await this.server.apis.get(method).apply(this.server, args);
+                return [await this.server.apis.get(method).apply(this.server, args), undefined];
             } catch (err) {
-                throw err;
+                return [null, err && err.message ? err.message : String(err)];
             }
         }
         if (this.apis.has(method)) {
-            return await this.apis.get(method).apply(this, args);
+            try {
+                return [await this.apis.get(method).apply(this, args), undefined];
+            } catch (err) {
+                return [null, err && err.message ? err.message : String(err)];
+            }
         }
-        throw new Error(`server function not registered: ${method}`);
+        return [null, `server function not registered: ${method}`];
     }
 
     /**

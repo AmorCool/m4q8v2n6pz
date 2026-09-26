@@ -501,9 +501,15 @@ console.log("\nboot");
             config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
         });
         const taskId = app.kernel.addTask({ url: "http://x/1" });
-        // RPC order is (taskId, cert, index); the kernel wants (taskId, index, cert).
+        // Server functions take (callerContext, selfContext, ...realArgs).
+        // The two leading entries are stripped by the registration wrapper, so
+        // they are passed here to exercise the same path a plugin uses.
+        // RPC order is then (taskId, cert, index); the kernel wants
+        // (taskId, index, cert).
         await app.mesh.main.callServerFunction(
             contract.SERVER_FUNCTIONS.ENABLE_DCDN_WITH_VIP_CERT,
+            "main-process",
+            { name: "vip-download" },
             taskId,
             { cert: "the-cert" },
             4
@@ -511,6 +517,24 @@ console.log("\nboot");
         const task = app.kernel.getTask(taskId);
         assert.strictEqual(task.dcdnFileIndex, 4, "index must not be mistaken for the cert");
         assert.strictEqual(task.bAcclerating, true);
+        await app.stop();
+    });
+
+    await testAsync("a plugin call strips the two context arguments", async () => {
+        const { createApplication } = require("../src/main/index");
+        const app = await createApplication({
+            config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        });
+        // GET_CONFIG_MODULES takes (module, key). If the wrapper were missing,
+        // the handler would read the context object as `module` and return [].
+        const modules = await app.mesh.main.callServerFunction(
+            contract.SERVER_FUNCTIONS.GET_CONFIG_MODULES,
+            "main-process",
+            { name: "vip-download" },
+            "VipDownload",
+            "WDYXDomains"
+        );
+        assert.deepStrictEqual(modules, ["lx.patch1.9you.com"]);
         await app.stop();
     });
 
@@ -533,6 +557,161 @@ console.log("\nboot");
         assert.deepStrictEqual(app.getConfigModules("HDVideo", "domains"), ["hd.xunlei.com"]);
         assert.deepStrictEqual(app.getConfigModules("VipDownload", "WDYXDomains"), ["lx.patch1.9you.com"]);
         assert.deepStrictEqual(app.getConfigModules("nope", "nope"), []);
+        await app.stop();
+    });
+
+    // -----------------------------------------------------------------------
+    // Plugin host
+    //
+    // A throwaway plugin directory is built on disk rather than pointing at
+    // the real plugin tree, so the test is self-contained: it proves the host
+    // contract, not that a particular internal build happens to be present.
+    // -----------------------------------------------------------------------
+    console.log("\nplugin host");
+
+    const os = require("os");
+    const fs = require("fs");
+    const pluginHost = require("../src/main/plugin-host");
+    const { createApplication } = require("../src/main/index");
+
+    function makeFakePlugin(rootDir, name, entrySource) {
+        const dir = path.join(rootDir, name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(
+            path.join(dir, "config.json"),
+            JSON.stringify({ name, version: "1.0.0", main: "index.js" })
+        );
+        fs.writeFileSync(path.join(dir, "index.js"), entrySource);
+        return dir;
+    }
+
+    await testAsync("a plugin loads with the globals it expects", async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "tl-plugin-"));
+        const dir = makeFakePlugin(
+            root,
+            "Fake",
+            `const fs = require("fs");
+             const path = require("path");
+             global.__probe = {
+                 rootDir: global.__rootDir,
+                 processName: global.__processName,
+                 hasServer: !!global.__xdasIPCServer,
+                 hasClient: !!global.__xdasIPCClienInstance,
+                 configName: global.__xdasPluginConfig && global.__xdasPluginConfig.name,
+                 dirname: __dirname,
+                 ownFile: fs.existsSync(path.join(__dirname, "config.json")),
+             };`
+        );
+
+        const app = await createApplication({
+            config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        });
+        const manifest = await app.loadPlugin(dir);
+
+        assert.strictEqual(manifest.name, "Fake");
+        const probe = global.__probe;
+        assert.strictEqual(probe.rootDir, dir, "__rootDir must be the plugin directory");
+        assert.strictEqual(probe.processName, "main");
+        assert.strictEqual(probe.hasServer, true);
+        assert.strictEqual(probe.hasClient, true);
+        assert.strictEqual(probe.configName, "Fake");
+        // This is the one that catches a plain require(): __dirname would then
+        // be this repo's scripts/ directory instead of the plugin's.
+        assert.strictEqual(probe.dirname, dir, "__dirname must point at the plugin");
+        assert.strictEqual(probe.ownFile, true);
+
+        delete global.__probe;
+        await app.stop();
+    });
+
+    await testAsync("the globals are restored after loading", async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "tl-plugin-"));
+        const dir = makeFakePlugin(root, "Fake", "void 0;");
+
+        const before = Object.prototype.hasOwnProperty.call(global, "__rootDir");
+        const app = await createApplication({
+            config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        });
+        await app.loadPlugin(dir);
+
+        assert.strictEqual(
+            Object.prototype.hasOwnProperty.call(global, "__rootDir"),
+            before,
+            "a global that did not exist before must be removed again"
+        );
+        assert.strictEqual(global.__rootDir, undefined);
+        await app.stop();
+    });
+
+    await testAsync("native call facade invokes the trailing callback", async () => {
+        let called = null;
+        const facade = pluginHost.createNativeCallFacade({});
+        // The plugins pass the callback last; a facade that swallowed it would
+        // stall startup, so this is the load-bearing behaviour.
+        facade.SomeNativeThing({ a: 1 }, (err, value) => {
+            called = { err, value };
+        });
+        assert.ok(called, "the callback must have run synchronously");
+        assert.strictEqual(called.err, null);
+        await Promise.resolve();
+    });
+
+    await testAsync("native call facade is not thenable", async () => {
+        const facade = pluginHost.createNativeCallFacade({});
+        assert.strictEqual(facade.then, undefined);
+        assert.strictEqual(await Promise.resolve(facade).then(() => "ok"), "ok");
+    });
+
+    await testAsync("AsyncGetNativeCallModuleObj answers asynchronously", async () => {
+        const env = new pluginHost.PluginEnvironment();
+        env.install({ rootDir: "/tmp/x", pluginName: "Fake", pluginConfig: {}, log: () => {} });
+        const bag = await new Promise((resolve) => {
+            global.AsyncGetNativeCallModuleObj(resolve);
+        });
+        assert.ok(bag && bag.nativeCall, "the module bag must expose nativeCall");
+        env.restore();
+    });
+
+    await testAsync("a broken plugin is reported without stopping the scan", async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "tl-plugins-"));
+        makeFakePlugin(root, "Good", "void 0;");
+        const bad = makeFakePlugin(root, "Bad", "throw new Error('boom');");
+
+        const app = await createApplication({
+            config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        });
+        const results = await app.loadPlugins(root);
+        const byName = Object.fromEntries(results.map((r) => [r.name, r]));
+
+        assert.ok(byName.Good && byName.Good.manifest, "the good plugin must load");
+        assert.ok(byName.Bad && byName.Bad.error, "the bad plugin must be reported");
+        assert.ok(/boom/.test(byName.Bad.error), byName.Bad.error);
+        await app.stop();
+    });
+
+    await testAsync("plugin functions land on the mesh", async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "tl-plugin-"));
+        const dir = makeFakePlugin(
+            root,
+            "Fake",
+            `global.__xdasIPCClienInstance.registerFunctions({
+                 FakeProbe: function () { return "from-plugin"; },
+             });`
+        );
+
+        const app = await createApplication({
+            config: { appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1" },
+        });
+        await app.loadPlugin(dir);
+
+        // callServerFunction unwraps the tuple: the shipped client does
+        // `return r && r[0]`, so callers see a bare value here. The tuple
+        // form lives on callServerFunctionEx.
+        const value = await app.mesh.main.callServerFunction("FakeProbe");
+        assert.strictEqual(value, "from-plugin");
+
+        const tuple = await app.mesh.main.callServerFunctionEx("FakeProbe");
+        assert.deepStrictEqual(tuple, ["from-plugin", undefined]);
         await app.stop();
     });
 

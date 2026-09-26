@@ -26,8 +26,26 @@ const { createMesh } = require("./rpc");
 const { ThunderKernel } = require("./kernel");
 const { LoginClient, createMemoryStore, parseVipInfo } = require("./login");
 const { VipTokenClient } = require("./vip-token");
+const { PluginHost } = require("./plugin-host");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
+
+// ---------------------------------------------------------------------------
+// Values taken from the shipped build
+// ---------------------------------------------------------------------------
+
+/*
+ * Defaults for `GetInitUserLoginParam`.
+ *
+ * These are the values the shipped User plugin carries in its own source, so
+ * a fresh checkout can complete an OAuth2 flow without being configured
+ * first. They are tenant credentials rather than protocol constants, which
+ * is why they are overridable through `config.loginParam` instead of being
+ * frozen into the contract.
+ */
+const DEFAULT_PROJECT_ID = "2rvk4e3gkdnl7u1kl0k";
+const DEFAULT_CLIENT_ID = "XXDfQA-ruQKfza9f";
+const DEFAULT_CLIENT_SECRET = "jXD0dQ-nm_yybCfqj7EqUKQtp6sc5q1kzodIj96Gfq0";
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -156,8 +174,11 @@ class Application extends EventEmitter {
         this.kernel = null;
         this.login = null;
         this.vipToken = null;
+        this.pluginHost = null;
 
         this.plugins = new Map();
+        // Views a plugin asked for before a renderer existed to mount them.
+        this.pendingWebviews = [];
         this.started = false;
     }
 
@@ -200,10 +221,19 @@ class Application extends EventEmitter {
             getBuildNo: () => buildNumberOf(this.config.clientVersion),
         });
 
-        // 5. Restore the previous session -------------------------------------
+        // 5. Plugin host ------------------------------------------------------
+        // Built before plugins load so that a plugin's registration calls have
+        // somewhere to land, but nothing is loaded yet: plugins expect a fully
+        // wired context and the session may still be restoring.
+        this.pluginHost = new PluginHost({
+            mesh: this.mesh,
+            log: (...a) => this.log.information(...a),
+        });
+
+        // 6. Restore the previous session -------------------------------------
         await this._restoreSession();
 
-        // 6. Anonymous fallback -----------------------------------------------
+        // 7. Anonymous fallback -----------------------------------------------
         // Delayed so it does not race a real login that is about to complete.
         this._anonymousTimer = setTimeout(() => {
             this.login.signUpAnonymously().catch((err) => {
@@ -227,20 +257,47 @@ class Application extends EventEmitter {
         const F = contract.SERVER_FUNCTIONS;
         const server = this.mesh.server;
 
+        /*
+         * Every plugin-side call arrives as (callerContext, selfContext, ...).
+         * The shipped handlers are declared that way, so each of ours gets the
+         * same two leading parameters stripped before it runs. Wrapping once
+         * here is what keeps the individual handlers readable, and it means a
+         * handler can never accidentally treat a context object as its first
+         * real argument.
+         */
+        const fromPlugin = (handler) => async (...all) => handler(...all.slice(2));
+
         server.registerFunctions({
-            [F.IS_LOGINED]: async () => this.login.isLogined(),
-            [F.GET_USER_ID]: async () => this.login.userId || "0",
-            [F.GET_SESSION_ID]: async () => this.login.sessionId || "",
-            [F.GET_PEER_ID]: async () => this.getPeerId(),
-            [F.GET_VIP_INFO]: async () => this.login.vipInfo || { isVip: false },
-            [F.GET_ALL_USER_INFO]: async () => this.login.userInfo,
-            [F.GET_USER_INFO]: async () => this.login.userInfo,
-            [F.GET_THUNDER_VERSION]: async () => this.config.clientVersion,
-            [F.GET_CONFIG_MODULES]: async (module, key) => this.getConfigModules(module, key),
+            [F.IS_LOGINED]: fromPlugin(async () => this.login.isLogined()),
+            [F.GET_USER_ID]: fromPlugin(async () => this.login.userId || "0"),
+            [F.GET_SESSION_ID]: fromPlugin(async () => this.login.sessionId || ""),
+            [F.GET_PEER_ID]: fromPlugin(async () => this.getPeerId()),
+            [F.GET_VIP_INFO]: fromPlugin(async () => this.login.vipInfo || { isVip: false }),
+            [F.GET_ALL_USER_INFO]: fromPlugin(async () => this.login.userInfo),
+            // The second argument selects a projection. VipDownload asks for
+            // projection 2, which is the vip-shaped subset; other callers ask
+            // for the full object. Both read it as JSON, hence the string.
+            [F.GET_USER_INFO]: fromPlugin(async (projection) =>
+                this.getUserInfoForPlugin(projection)),
+            [F.GET_THUNDER_VERSION]: fromPlugin(async () => this.config.clientVersion),
+            [F.GET_CONFIG_MODULES]: fromPlugin(async (module, key) =>
+                this.getConfigModules(module, key)),
+
+            // The OAuth2 client credentials.
+            //
+            // The User plugin asks for this before it can make any xbase
+            // request, and it then does `param.userAgent = hackUA(param)`
+            // without a null check -- so returning null here is not a safe
+            // stub, it is a crash. It must return an object.
+            //
+            // apiOrigin follows the project id: https://<PROJECT_ID>.xbase.xyz.
+            // The plugin's own source carries the same value for its internal
+            // build, which is how the shape was confirmed.
+            [F.GET_INIT_USER_LOGIN_PARAM]: fromPlugin(async () => this.getInitUserLoginParam()),
 
             // Credentials for the device signature inputs.
-            [F.GET_DEVICE_ID]: async () => this.login.deviceSign,
-            [F.GET_LOGIN_DEVICE_ID]: async () => this.login.deviceSign,
+            [F.GET_DEVICE_ID]: fromPlugin(async () => this.login.deviceSign),
+            [F.GET_LOGIN_DEVICE_ID]: fromPlugin(async () => this.login.deviceSign),
 
             // VIP / DCDN.
             //
@@ -248,19 +305,32 @@ class Application extends EventEmitter {
             // plugin RPC sends (taskId, cert, index) while the kernel wants
             // (taskId, index, cert). Doing it at this boundary keeps both
             // sides faithful to their own convention.
-            [F.ENABLE_DCDN_WITH_VIP_CERT]: async (taskId, cert, index) =>
-                this.kernel.enableDcdnWithVipCert(taskId, index, cert),
-            [F.UPDATE_DCDN_WITH_VIP_CERT]: async (taskId, cert, index) =>
-                this.kernel.updateDcdnWithVipCert(taskId, index, cert),
-            [F.DISABLE_DCDN_WITH_VIP_CERT]: async (taskId, index) =>
-                this.kernel.disableDcdnWithVipCert(taskId, index),
+            [F.ENABLE_DCDN_WITH_VIP_CERT]: fromPlugin(async (taskId, cert, index) =>
+                this.kernel.enableDcdnWithVipCert(taskId, index, cert)),
+            [F.UPDATE_DCDN_WITH_VIP_CERT]: fromPlugin(async (taskId, cert, index) =>
+                this.kernel.updateDcdnWithVipCert(taskId, index, cert)),
+            [F.DISABLE_DCDN_WITH_VIP_CERT]: fromPlugin(async (taskId, index) =>
+                this.kernel.disableDcdnWithVipCert(taskId, index)),
 
-            [F.GET_DOWNLOADING_ACTIVE_TASK_ID]: async () => this.getActiveTaskId(),
-            [F.SELECT_CATEGORY_VIEW]: async () => undefined,
-            [F.SET_PLUGIN_STATUS]: async () => undefined,
-            [F.TRACK_EVENT]: async () => undefined,
-            [F.REGISTER_WEB_EXTERNAL]: async () => undefined,
-            [F.REGISTER_WEB_INTERNAL]: async () => undefined,
+            // Plugins ask the renderer to mount a webview. The real work is a
+            // `document.createElement("webview")` in a renderer, which does
+            // not exist yet, so the request is recorded and answered with the
+            // shape the caller destructures: [ok, message]. Claiming success
+            // without mounting would be worse than this -- the caller would
+            // believe a view exists -- so the record is what a future renderer
+            // drains.
+            [F.CREATE_WEBVIEW]: fromPlugin(async (viewId, params) =>
+                this.createWebview(viewId, params)),
+
+            [F.GET_DOWNLOADING_ACTIVE_TASK_ID]: fromPlugin(async () => this.getActiveTaskId()),
+            [F.SELECT_CATEGORY_VIEW]: fromPlugin(async () => undefined),
+            [F.SET_PLUGIN_STATUS]: fromPlugin(async () => undefined),
+            [F.TRACK_EVENT]: fromPlugin(async () => undefined),
+            [F.REGISTER_WEB_EXTERNAL]: fromPlugin(async () => undefined),
+            [F.REGISTER_WEB_INTERNAL]: fromPlugin(async () => undefined),
+            // ThunderPanPlugin asks for a peer id of its own; the sign-in one
+            // is what the transport uses, so they are the same value.
+            [F.GET_TP_PEER_ID]: fromPlugin(async () => this.getPeerId()),
         });
     }
 
@@ -370,34 +440,138 @@ class Application extends EventEmitter {
         return mod[key];
     }
 
+    /**
+     * The OAuth2 client credentials the User plugin builds every xbase
+     * request from.
+     *
+     * Two things about this are load-bearing:
+     *
+     *   1. It must never return null. The plugin immediately writes to the
+     *      result (`param.userAgent = hackUA(param)`) with no guard, so a
+     *      null is a crash rather than a degraded start.
+     *   2. `apiOrigin` is derived, not arbitrary: the shipped internal build
+     *      uses `https://2rvk4e3gkdnl7u1kl0k.xbase.xyz`, and
+     *      `2rvk4e3gkdnl7u1kl0k` is that plugin's PROJECT_ID. So the form is
+     *      `https://<projectId>.xbase.xyz`.
+     *
+     * The credentials themselves are tenant data, so they come from config
+     * and fall back to the values the shipped plugin carries.
+     */
+    getInitUserLoginParam() {
+        const overrides = this.config.loginParam || {};
+        const projectId = overrides.projectId || DEFAULT_PROJECT_ID;
+
+        return {
+            apiOrigin: overrides.apiOrigin || `https://${projectId}.xbase.xyz`,
+            clientId: overrides.clientId || DEFAULT_CLIENT_ID,
+            clientSecret: overrides.clientSecret || DEFAULT_CLIENT_SECRET,
+            // Left empty on purpose: the plugin fills it from the client
+            // build when it is absent, and it knows its own UA string better
+            // than we do.
+            userAgent: overrides.userAgent || "",
+        };
+    }
+
+    /**
+     * The user profile as a plugin consumes it.
+     *
+     * Callers parse the result as JSON, so a string is the correct type here
+     * even though the underlying value is an object. Returning the object
+     * directly makes `JSON.parse` throw inside the plugin.
+     *
+     * `projection` selects a subset. VipDownload passes 2 and then reads
+     * `vasType` and `isVip` off the result; the rest of the client asks for
+     * the whole profile. Both spellings of the vip flag are emitted because
+     * the plugin compares `isVip` by string (`=== "1"`) while the parser
+     * produces a boolean.
+     */
+    getUserInfoForPlugin(projection) {
+        const info = this.login.userInfo || {};
+        const vip = this.login.vipInfo || {};
+
+        if (Number(projection) === 2) {
+            return JSON.stringify({
+                vasType: vip.vasType || 0,
+                isVip: vip.isVip ? "1" : "0",
+                vipLevel: vip.vipLevel || 0,
+                vipType: vip.vipType || "",
+                userId: this.login.userId || "0",
+                nickName: info.nickName || info.usernick || "",
+            });
+        }
+
+        return JSON.stringify(info);
+    }
+
+    /**
+     * Record a plugin's request to mount a view.
+     *
+     * The original creates a real Electron <webview> here. That is a renderer
+     * responsibility and this process has no DOM, so the request is queued and
+     * acknowledged instead. A renderer that comes up later drains the queue.
+     *
+     * The reply shape is the important part: the caller destructures it as
+     * `[ok, message]` and only proceeds with the rest of its start-up when
+     * `ok` is truthy.
+     */
+    createWebview(viewId, params) {
+        if (!params || !params.src) {
+            return [false, "CreateWebview needs a src"];
+        }
+
+        this.pendingWebviews.push({
+            id: viewId,
+            src: params.src,
+            nodeintegration: params.nodeintegration,
+        });
+        this.log.information("webview queued:", viewId, params.src);
+
+        return [true, "success"];
+    }
+
     // -----------------------------------------------------------------------
     // Plugin host
     // -----------------------------------------------------------------------
 
     /**
-     * Load a plugin into the mesh.
+     * Load a plugin directory into the running application.
      *
-     * A plugin is a function that receives the wiring it needs and returns
-     * its registered functions. This mirrors how the shipped plugins call
-     * `AsyncGetNativeCallModuleObj` to obtain their context.
+     * The plugins are unmodified webpack bundles that read their wiring off
+     * `global` and register themselves by side effect, so all the work is in
+     * the host. Loading an unmodified plugin is the strongest available check
+     * that the contract has been reproduced correctly.
+     *
+     * @param {string} pluginDir  directory containing config.json
      */
-    async loadPlugin(pluginPath) {
-        const manifest = require(path.join(pluginPath, "config.json"));
-        const entry = require(path.join(pluginPath, manifest.main));
-
-        const context = {
-            contract,
-            log: createLogger(manifest.name),
-            client: this.mesh.main,
-            registerFunctions: (fns) => this.mesh.main.registerFunctions(fns),
-            callServerFunction: (name, ...args) =>
-                this.mesh.main.callServerFunction(name, ...args),
-        };
-
-        const registered = await entry(context);
-        this.plugins.set(manifest.name, { manifest, registered });
-        this.log.information("plugin loaded:", manifest.name, manifest.version);
+    async loadPlugin(pluginDir) {
+        if (!this.pluginHost) {
+            throw new Error("plugin host is not available; start() the application first");
+        }
+        const manifest = this.pluginHost.load(pluginDir);
+        this.plugins.set(manifest.name, { manifest, dir: pluginDir });
         return manifest;
+    }
+
+    /**
+     * Load every plugin under a directory.
+     *
+     * Failures are collected rather than thrown: a client should still start
+     * with the plugins that do work.
+     */
+    async loadPlugins(pluginsRoot) {
+        if (!this.pluginHost) {
+            throw new Error("plugin host is not available; start() the application first");
+        }
+        const results = this.pluginHost.loadAll(pluginsRoot);
+        for (const result of results) {
+            if (result.manifest) {
+                this.plugins.set(result.name, {
+                    manifest: result.manifest,
+                    dir: path.join(pluginsRoot, result.name),
+                });
+            }
+        }
+        return results;
     }
 
     // -----------------------------------------------------------------------
