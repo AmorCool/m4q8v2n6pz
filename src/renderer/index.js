@@ -84,6 +84,15 @@ function describeLoginError(message) {
 
 const VIP_LABEL = { normal: "普通会员", platinum: "白金会员", super: "超级会员" };
 
+/*
+ * 迅雷不强制登录.
+ *
+ * 未登录时照样进主界面, 能下载 HTTP / BT / 磁力链. 只有云盘和转存需要账号,
+ * 那两处会自己提示. 之前是未登录直接切到登录页, 结果是没账号就什么都干不了 --
+ * 而用户装迅雷本来就是为了下载.
+ *
+ * 登录页现在是主动进的: 点账号区的「登录」按钮, 或者点了云盘触发.
+ */
 function showLogin() {
     $("login").classList.remove("is-hidden");
     $("app").classList.add("is-hidden");
@@ -91,6 +100,7 @@ function showLogin() {
     $("account-name").title = "";
     $("account-vip").classList.add("is-hidden");
     $("logout").classList.add("is-hidden");
+    $("signin").classList.remove("is-hidden");
 }
 
 function showApp(summary) {
@@ -100,26 +110,31 @@ function showApp(summary) {
 }
 
 function renderAccount(summary) {
-    $("account-name").textContent = summary.nickname || summary.userId || "已登录";
+    const signedIn = Boolean(summary.nickname || summary.userId);
+    $("account-name").textContent = summary.nickname || summary.userId || "未登录";
     $("account-name").title = summary.userId || "";
     const label = VIP_LABEL[summary.vipType] || "";
     $("account-vip").textContent = label;
     $("account-vip").classList.toggle("is-hidden", !(summary.isVip && label));
-    $("logout").classList.remove("is-hidden");
+    // 未登录显示「登录」, 已登录显示「退出」. 两个按钮互斥, 不然会有两个入口
+    // 同时挂在同一个位置.
+    $("logout").classList.toggle("is-hidden", !signedIn);
+    $("signin").classList.toggle("is-hidden", signedIn);
 }
 
 /*
  * Decide the initial screen.
  *
- * A session restored from disk shows the task list without a login round trip;
- * a fresh install shows the login screen. The profile fetch is allowed to fail
- * -- an unreachable account server should still let a signed-in user reach
- * their downloads -- so a failure falls back to the bare identity.
+ * 未登录也进主界面. A session restored from disk shows the profile; without
+ * one the task list still works and the account area offers a way in. The
+ * profile fetch is allowed to fail -- an unreachable account server should
+ * still let a signed-in user reach their downloads -- so a failure falls back
+ * to the bare identity.
  */
 async function loadSession() {
     const loggedIn = await callRaw("IsLogined");
     if (!loggedIn.ok || !loggedIn.value) {
-        showLogin();
+        showApp({});
         return;
     }
     const summary = await callRaw("RefreshUserInfo");
@@ -320,10 +335,12 @@ async function submitPhone() {
 async function logout() {
     stopQRPolling();
     // Best effort. The server clears local state even when the request fails,
-    // so the screen switches either way -- leaving the task list up would show
+    // so the account area resets either way -- leaving a profile up would show
     // a session that no longer exists.
     await callRaw("Logout");
-    showLogin();
+    // 退出之后回主界面, 不是回登录页. 迅雷退出账号照样能下载, 把人赶回登录页
+    // 等于逼他再登一次才能用 -- 而这正是未登录状态下不该发生的事.
+    showApp({});
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +579,8 @@ function handleEvent(name, payload) {
             loadSession();
             break;
         case "onLogout":
-            showLogin();
+            // 回主界面, 不是登录页. 理由同 logout().
+            showApp({});
             break;
         default:
             return;
@@ -675,8 +693,23 @@ function init() {
     // The cloud-drive browser. It is its own window, so this is the whole
     // wiring: ask the main process to open it. The page lists the drive
     // itself once it is up.
-    document.getElementById("open-pan").addEventListener("click", () => {
+    //
+    // 云盘是唯一需要账号的入口 -- 迅雷不登录也能下载, 但云盘文件必须先登录才
+    // 能取直链. 所以这里拦一下, 把人引到登录页, 而不是开出一个必然 401 的窗口.
+    document.getElementById("open-pan").addEventListener("click", async () => {
+        const loggedIn = await callRaw("IsLogined");
+        if (!loggedIn.ok || !loggedIn.value) {
+            showLogin();
+            selectTab("qr");
+            $("qr-status").textContent = "云盘需要登录迅雷账号";
+            return;
+        }
         call("CreatePanWindow");
+    });
+
+    document.getElementById("signin").addEventListener("click", () => {
+        showLogin();
+        selectTab("qr");
     });
 
     document.getElementById("add").addEventListener("click", async () => {
