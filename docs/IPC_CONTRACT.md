@@ -218,7 +218,78 @@ return xlstat4.trackEvent(key, attr1, attr2, cost1, cost2, cost3, cost4, extData
 
 ⇒ `global.b` 是**给崩溃转储用的**（崩溃时能读到最近一次埋点参数）。复刻时如果不需要崩溃上报，可以省。
 
-## 8. 复刻顺序建议
+## 8. 任务操作命令名（★ 2026-09-26 补）
+
+从 `E:\Thunder\Program\resources\app\out\` 的发布包里读出。**这批名字在复刻时必须照抄** ——
+它们既是渲染层的命令名，也是主进程要注册的 server function 名。
+
+### 8.1 为什么原版没有把这些做成 server function
+
+原版**渲染层直接持有内核对象**。在 `main-renderer/renderer.js` 里实测到的是
+**进程内方法调用**，不是 RPC：
+
+```js
+ThunderKernel.deleteTask(...)      // 进程内
+ThunderKernel.startTask(...)       // 进程内
+ThunderKernel.getTaskBaseInfo(...) // 进程内
+```
+
+⇒ 复刻如果把内核放在主进程（`_thunder_git` 就是这么做的），
+**必须自己把这组操作暴露成 server function**，否则渲染层无路可走。
+
+### 8.2 任务相关命令名全表
+
+```
+CreateNewTask        CreateNewTaskEx      CreatePreNewTaskWindow
+CreateTaskDirectly   CreateTaskBase
+CreateMagnetTask     CreateBtTask          CreateEmuleTask
+CreateGroupTask      CreateDownloadAndPlayTask
+
+DeleteTask           DestroyTaskBase       DestroyBtTask
+DestroyEmuleTask     DestroyMagnetTask     DestroyGroupTask
+
+PauseTask            PauseAll              Continue
+ReDownload           CancelDownloadCompleteTask
+CompletedTaskPlay
+
+BatchFindBtTask      BatchFindEmuleTask    BatchFindGroupTask
+AutoBTNewTask        PreDownload           PreDownloading
+DetailSaveTask       MoveTask              LoadTaskBasic
+```
+
+### 8.3 容易误判成命令名的枚举值
+
+下面这些**是枚举成员，不是 RPC 方法名** —— 搜到它们时不要当成接口：
+
+| 名字 | 实际身份 |
+|---|---|
+| `DeleteTask` | `TaskStopReason` 枚举：`Manual=0, PauseAll=1, DeleteTask=2, TaskJammed=3` |
+| `LoadTaskBasic` | 某个 reason 枚举：`LoadTaskBasic=0, Create=1, Complete=2` |
+| `MoveTask` | 某个 reason 枚举：`LowSpeed=4, MaxDownloadReduce=5, MoveTask=6` |
+
+⇒ `DeleteTask` **同时**是命令名和枚举成员。判断方法：看它在
+`callServerFunction("...")` 里还是在一个 `e[e.X = n] = "X"` 的映射里。
+
+### 8.4 上下文常量（照抄）
+
+```js
+DownloadKernel.TaskStatus            // 任务状态
+DownloadKernel.TaskType              // 任务类型
+DownloadKernel.TaskError             // 错误码
+DownloadKernel.TaskStopReason        // 见 8.3
+DownloadKernel.CategroyViewID        // 注意原版拼写就是 Categroy（漏了 o）
+DownloadKernel.Downloading
+DownloadKernel.CategoryManager       // 分类管理
+DownloadKernel.CategoryView
+DownloadKernel.TaskManager           // 任务集合
+DownloadKernel.ThunderKernel         // 内核对象本体
+```
+
+`CategroyViewID` 的拼写错误是**原版就有的**，复刻时若改名会导致对比日志对不上。
+
+---
+
+## 9. 复刻顺序建议
 
 1. **先照抄常量层**：三个 GUID、上下文名表、`ThunderChannelList` 常量。
 2. **实现 `node-net-ipc` 等价物**：Node `net.createServer` + Windows named pipe 即可。
