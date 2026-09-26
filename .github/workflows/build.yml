@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check
+        run: npm run lint
+
+      - name: Smoke test
+        run: npm test
+
+      - name: Boot check
+        shell: pwsh
+        env:
+          TL_OUTPUT: console
+          TL_APPID: ci-app
+          TL_APPKEY: ci-key
+        run: |
+          # The app runs until interrupted, so start it, give it time to boot,
+          # then stop it. A non-zero exit from the timeout path is expected.
+          $p = Start-Process node -ArgumentList 'src/main/index.js' -PassThru -NoNewWindow -RedirectStandardOutput boot.log -RedirectStandardError boot.err
+          Start-Sleep -Seconds 4
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Get-Content boot.log
+          if (-not (Select-String -Path boot.log -Pattern 'booted' -Quiet)) {
+            Get-Content boot.err
+            throw 'application did not reach the booted state'
+          }

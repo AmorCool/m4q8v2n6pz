@@ -1,0 +1,15 @@
+{
+    "_comment": "Application config. The four values in the first block are the material the device signature is derived from, so they have to match the build they are paired with. Nothing here is a secret: appid/appkey are identifiers, not credentials, and the original ships them in plain sight.",
+
+    "appid": "",
+    "appkey": "",
+    "appName": "Thunder",
+    "package": "com.xunlei.thunder",
+    "clientVersion": "12.1.2.2662",
+    "platformVersion": "0",
+
+    "clientId": "XW5SkOhLDjnOZP7J",
+
+    "_comment_endpoints": "Override only when pointing at a test environment.",
+    "endpoints": {}
+}

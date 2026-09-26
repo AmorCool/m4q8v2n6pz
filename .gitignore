@@ -1,0 +1,13 @@
+node_modules/
+*.log
+boot.log
+boot.err
+.env
+.env.*
+dist/
+build/
+out/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+config/app.local.json
