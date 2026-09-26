@@ -66,7 +66,7 @@ const LOGIN_ERROR_TEXT = {
     invalid_password: "密码错误",
     user_blocked: "账号已被封禁",
     user_pending: "账号尚未激活",
-    captcha_required: "需要输入图形验证码（该接口未复刻）",
+    captcha_required: "需要输入图形验证码",
     captcha_invalid: "图形验证码错误",
     invalid_verification_code: "验证码错误",
     two_factor_required: "需要二次验证",
@@ -167,32 +167,44 @@ function toggleReveal() {
 }
 
 /*
- * The account/password tab cannot finish a login yet, and it says so through
- * the server rather than in the page.
+ * The account/password tab.
  *
- * The server wants a loginkey, and the step that turns a password into one
- * lives in the original's qLogin bundle -- not in this repository. The call is
- * still made, with the credential as far as it can be assembled, so the gap is
- * reported by the same path that will report a real failure once the
- * derivation exists. Hardcoding the message here would leave a second place to
- * change and would take the transport out of the flow.
+ * The password goes to the server as-is: the original sends it with
+ * `isMd5Pwd: "0"` over HTTPS and hashes nothing client-side
+ * (LOGIN_PROTOCOL_SPEC.md section 4), so there is nothing to pre-hash here.
+ * The captcha field stays hidden until the server asks for it, which is the
+ * only moment a user can supply one.
  */
 async function submitPassword() {
     const error = $("login-error");
     error.textContent = "";
-    const userid = $("login-account").value.trim();
-    const password = $("login-password").value;
-    if (!userid || !password) {
+    const userName = $("login-account").value.trim();
+    const passWord = $("login-password").value;
+    const verifyCode = $("login-captcha").value.trim();
+    if (!userName || !passWord) {
         error.textContent = "请输入账号和密码";
         return;
     }
 
-    const outcome = await callRaw("LoginWithKey", { userid, loginkey: "" });
-    if (!outcome.ok) {
-        error.textContent = describeLoginError(outcome.error);
-        return;
+    const button = $("login-submit");
+    button.disabled = true;
+    button.textContent = "登录中…";
+    try {
+        const outcome = await callRaw("LoginWithKey", { userName, passWord, verifyCode });
+        if (!outcome.ok) {
+            // A captcha challenge is not a dead end: reveal the field so the
+            // next attempt can carry the code.
+            if (/图形验证码/.test(outcome.error)) {
+                $("login-captcha-field").classList.remove("is-hidden");
+            }
+            error.textContent = describeLoginError(outcome.error);
+            return;
+        }
+        await loadSession();
+    } finally {
+        button.disabled = false;
+        button.textContent = "登录";
     }
-    await loadSession();
 }
 
 // --- QR --------------------------------------------------------------------
@@ -209,18 +221,21 @@ function stopQRPolling() {
 /*
  * Ask for a QR payload and start polling for the scan.
  *
- * Both calls are registered but unimplemented: the device-code sequence was
- * not recovered, so the request fails and its reason is shown in the status
- * line. The loop below is what runs once a payload exists. The interval is the
- * one part of this path that is a guess, so it is kept responsive and is
- * cancelled on the first conclusive answer.
+ * The payload's `image` is an SVG data URL the main process renders from the
+ * device-code URL -- the original draws the same URL locally with qrious
+ * (spec section 2A step 2). The poll interval comes from the device-code
+ * response rather than being fixed, because the server rate-limits the token
+ * endpoint and answers a too-fast poll with an error instead of a status.
  */
 async function refreshQRCode() {
     stopQRPolling();
     const status = $("qr-status");
     const placeholder = $("qr-placeholder");
+    const image = $("qr-image");
     status.textContent = "正在获取二维码…";
     placeholder.textContent = "二维码加载中…";
+    placeholder.classList.remove("is-hidden");
+    image.classList.add("is-hidden");
 
     const outcome = await callRaw("GetLoginQRCode");
     if (!outcome.ok) {
@@ -231,33 +246,56 @@ async function refreshQRCode() {
 
     const payload = outcome.value || {};
     if (payload.image) {
-        $("qr-image").src = payload.image;
-        $("qr-image").classList.remove("is-hidden");
+        image.src = payload.image;
+        image.classList.remove("is-hidden");
         placeholder.classList.add("is-hidden");
     }
     status.textContent = "请使用迅雷 App 扫码";
-    pollQRCode(payload.id);
+    const interval = Math.max(1, Number(payload.interval) || 2) * 1000;
+    pollQRCode(interval);
 }
 
-function pollQRCode(id) {
+/*
+ * Poll for the scan result.
+ *
+ * The states are the ones LoginClient.pollScanLogin reports. "pending" and
+ * "scanned" keep the loop alive; everything else is conclusive and stops it,
+ * because a poll on a dead code can only repeat the same answer.
+ */
+function pollQRCode(interval) {
     qrTimer = setInterval(async () => {
-        const outcome = await callRaw("CheckLoginQRCode", id);
+        const outcome = await callRaw("CheckLoginQRCode", "scan");
         if (!outcome.ok) {
             stopQRPolling();
             $("qr-status").textContent = describeLoginError(outcome.error);
             return;
         }
-        const state = (outcome.value && outcome.value.state) || "";
-        if (state === "scanned") {
-            $("qr-status").textContent = "已扫码，请在手机上确认";
-        } else if (state === "confirmed") {
-            stopQRPolling();
-            await loadSession();
-        } else if (state === "expired") {
-            stopQRPolling();
-            $("qr-status").textContent = "二维码已失效，请刷新";
+        const value = outcome.value || {};
+        switch (value.state) {
+            case "pending":
+                $("qr-status").textContent = "请使用迅雷 App 扫码";
+                break;
+            case "scanned":
+                $("qr-status").textContent = "已扫码，请在手机上确认";
+                break;
+            case "confirmed":
+                stopQRPolling();
+                $("qr-status").textContent = "登录成功";
+                await loadSession();
+                break;
+            case "expired":
+                stopQRPolling();
+                $("qr-status").textContent = "二维码已失效，请刷新";
+                break;
+            case "denied":
+                stopQRPolling();
+                $("qr-status").textContent = "已在手机上取消登录，请刷新后重试";
+                break;
+            default:
+                stopQRPolling();
+                $("qr-status").textContent = value.message || "扫码登录失败";
         }
-    }, 2000);
+    }, interval);
 }
 
 // --- phone -----------------------------------------------------------------
@@ -266,7 +304,9 @@ let countdownTimer = null;
 
 function startCountdown() {
     const button = $("phone-send");
-    let left = 60;
+    // 59 seconds, not 60: the original's own resend gate is 59000 ms
+    // (LOGIN_PROTOCOL_SPEC.md section 3.1, `setNotSendsms`).
+    let left = 59;
     button.disabled = true;
     button.textContent = `${left}s 后重发`;
     countdownTimer = setInterval(() => {
@@ -282,6 +322,14 @@ function startCountdown() {
     }, 1000);
 }
 
+/*
+ * Ask for an SMS code.
+ *
+ * The server can answer with a captcha challenge instead of sending, in which
+ * case `captchaRequired` comes back and the image-captcha field is revealed.
+ * That is a state, not a failure: the request has to be repeated with the
+ * code the user reads off the picture.
+ */
 async function sendPhoneCode() {
     const error = $("phone-error");
     error.textContent = "";
@@ -290,9 +338,25 @@ async function sendPhoneCode() {
         error.textContent = "请输入 11 位手机号";
         return;
     }
-    const outcome = await callRaw("SendPhoneCode", phone);
+
+    const button = $("phone-send");
+    const verifyCode = $("phone-captcha").value.trim();
+    button.disabled = true;
+    const outcome = await callRaw("SendPhoneCode", phone, verifyCode);
     if (!outcome.ok) {
+        button.disabled = false;
+        if (/图形验证码/.test(outcome.error)) {
+            $("phone-captcha-field").classList.remove("is-hidden");
+        }
         error.textContent = describeLoginError(outcome.error);
+        return;
+    }
+
+    const value = outcome.value || {};
+    if (value.captchaRequired) {
+        button.disabled = false;
+        $("phone-captcha-field").classList.remove("is-hidden");
+        error.textContent = value.message || "请输入图形验证码后重试";
         return;
     }
     startCountdown();
@@ -318,12 +382,18 @@ async function submitPhone() {
         error.textContent = "请输入 11 位手机号";
         return;
     }
-    if (!/^\d{4,6}$/.test(code)) {
-        error.textContent = "请输入验证码";
+    // The original validates the code locally as exactly six digits before it
+    // sends anything (LOGIN_PROTOCOL_SPEC.md section 3.2).
+    if (!/^\d{6}$/.test(code)) {
+        error.textContent = "请输入 6 位短信验证码";
         return;
     }
-    const outcome = await callRaw("LoginWithPhone", { phone, code });
+    const verifyCode = $("phone-captcha").value.trim();
+    const outcome = await callRaw("LoginWithPhone", { phone, code, verifyCode });
     if (!outcome.ok) {
+        if (/图形验证码/.test(outcome.error)) {
+            $("phone-captcha-field").classList.remove("is-hidden");
+        }
         error.textContent = describeLoginError(outcome.error);
         return;
     }

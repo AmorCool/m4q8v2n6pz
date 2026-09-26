@@ -1,14 +1,16 @@
 {
-    "_comment": "Application config. The four values in the first block are the material the device signature is derived from, so they have to match the build they are paired with. Nothing here is a secret: appid/appkey are identifiers, not credentials, and the original ships them in plain sight.",
+    "_comment": "Application config. The values in the first block are the material the device signature is derived from and the identity every login request carries, so they have to match the build they are paired with. Nothing here is a secret: appid/appkey are identifiers, not credentials, and the original ships them in plain sight (out/main-renderer/renderer.js getInitData).",
 
-    "appid": "",
-    "appkey": "",
-    "appName": "Thunder",
-    "package": "com.xunlei.thunder",
+    "appid": "0",
+    "appkey": "4af30ad6c6b0c02c4d8df3ded2cb79b8",
+    "appName": "PC-com.xunlei.thunderx",
+    "package": "com.xunlei.thunderx",
     "clientVersion": "12.1.2.2662",
     "platformVersion": "0",
 
-    "clientId": "XW5SkOhLDjnOZP7J",
+    "_comment_oauth": "Account-centre OAuth2 tenant. The login client uses this pair for the device-code scan flow and the session->token exchange; the original carries it in getInitUserLoginParam.",
+    "clientId": "XW-G4v1H72tgfJym",
+    "clientSecret": "Qbaferw2knfQKqxa25EYJGtZ2_6755CMwzXBN3ctW54",
 
     "_comment_engine": "Download engine. Leave aria2Path out and the app looks for bin/aria2c(.exe), then vendor/aria2/, then <resources>/bin/. With none of those present it falls back to a stub engine so the app still starts. downloadDir defaults to ~/ThunderX.",
     "aria2Path": "",

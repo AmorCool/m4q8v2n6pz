@@ -25,6 +25,7 @@ const contract = require("./contract");
 const { createMesh } = require("./rpc");
 const { ThunderKernel } = require("./kernel");
 const { LoginClient, createMemoryStore, parseVipInfo } = require("./login");
+const qrcode = require("./qrcode");
 const { PanClient, PAN_ERROR } = require("./pan");
 const { VipTokenClient } = require("./vip-token");
 const { PluginHost } = require("./plugin-host");
@@ -392,7 +393,8 @@ class Application extends EventEmitter {
             [F.LOGOUT]: fromPlugin(async () => this.onLogout()),
             [F.GET_LOGIN_QRCODE]: fromPlugin(async () => this.getLoginQRCode()),
             [F.CHECK_LOGIN_QRCODE]: fromPlugin(async (id) => this.checkLoginQRCode(id)),
-            [F.SEND_PHONE_CODE]: fromPlugin(async (phone) => this.sendPhoneCode(phone)),
+            [F.SEND_PHONE_CODE]: fromPlugin(async (phone, verifyCode) =>
+                this.sendPhoneCode(phone, verifyCode)),
             [F.LOGIN_WITH_PHONE]: fromPlugin(async (credential) =>
                 this.loginWithPhone(credential)),
 
@@ -801,50 +803,128 @@ class Application extends EventEmitter {
     /**
      * Complete an interactive login from a credential.
      *
-     * The credential is the tail of the web-login flow: `{loginkey, userid,
-     * usernick}`. The login client already knows how to turn that into a
-     * session; what this adds is the order the three steps have to run in.
-     * The session has to exist before the profile can be fetched, and the
-     * profile before the kernel can be told which membership to accelerate
-     * for -- so `onLoginSucceeded` sits between them rather than beside them.
+     * Three credential shapes arrive here, one per login tab:
+     *   - `{ userName, passWord }`  account + password (v3 `login`)
+     *   - `{ loginkey, userid }`    a credential someone else obtained
+     *   - anything else             rejected, rather than sent on half-formed
      *
-     * A missing loginkey is rejected here rather than sent on. The step that
-     * produces one from a password lives in the original's qLogin bundle,
-     * which is not part of this repository, so an empty value is a known
-     * client-side gap and not a wrong password. Reporting the two the same
-     * way would send a user hunting for a password problem that is not there.
+     * The password shape is the one the original calls "account login": the
+     * client posts the password, the server answers with a loginkey, and the
+     * loginkey is then exchanged for a session. The recovered spec carries the
+     * whole sequence (LOGIN_PROTOCOL_SPEC.md section 4), so there is no
+     * missing asset here any more -- the earlier note claiming the step lived
+     * in the qLogin bundle was wrong (spec section 5).
+     *
+     * Order matters and is enforced by `_completeInteractiveLogin`: the
+     * session has to exist before the profile can be fetched, and the profile
+     * before the kernel is told which membership to accelerate for.
      */
     async loginWithCredential(credential) {
         const cred = credential || {};
-        if (!cred.loginkey) {
-            throw new Error(
-                "账号密码登录尚未复刻：密码换 loginkey 的步骤在 qLogin 里，" +
-                    "仓库中没有该资产"
-            );
+        const password = cred.passWord !== undefined ? cred.passWord : cred.password;
+
+        if (password !== undefined && password !== null && password !== "") {
+            await this.login.loginWithPassword({
+                userName: String(cred.userName || cred.userid || ""),
+                passWord: String(password),
+                verifyCode: cred.verifyCode ? String(cred.verifyCode) : "",
+            });
+        } else if (cred.loginkey) {
+            await this.login.loginWithKey({
+                loginkey: String(cred.loginkey),
+                userid: String(cred.userid || ""),
+                usernick: String(cred.usernick || ""),
+            });
+        } else {
+            throw new Error("请输入账号和密码");
         }
 
-        await this.login.loginWithKey({
-            loginkey: String(cred.loginkey),
-            userid: String(cred.userid || ""),
-            usernick: String(cred.usernick || ""),
-        });
+        return this._completeInteractiveLogin();
+    }
 
+    /**
+     * The tail every interactive path shares: profile, kernel, keepalive,
+     * token.
+     *
+     * The token exchange is best effort and deliberately after the login is
+     * already live. A token the account center will not issue must not roll
+     * back a session that is otherwise usable; the VIP paths report their own
+     * failure.
+     */
+    async _completeInteractiveLogin() {
         await this.onLoginSucceeded();
-
-        // Best effort, and deliberately after the login is already live. A
-        // token the account center will not issue must not roll back a session
-        // that is otherwise usable; the VIP paths report their own failure.
         try {
             await this.login.exchangeSessionForToken();
         } catch (err) {
             this.log.warning("token exchange failed:", err.message);
         }
-
         return {
             ok: true,
             userId: this.login.userId,
             nickname: this.login.nickname,
         };
+    }
+
+    /*
+     * The three interactive paths.
+     *
+     * All three are implemented against the recovered protocols
+     * (LOGIN_PROTOCOL_SPEC.md sections 2A, 3 and 4); none of them is a stub.
+     * They are thin because the work lives in the login client -- these
+     * methods exist to own the ordering and to translate the client's shapes
+     * into what the login screen renders.
+     */
+
+    /**
+     * Mint a device code and render it as a QR image.
+     *
+     * The QR payload is a URL, so the image is produced here (the renderer's
+     * CSP allows `data:` but not remote images, and the phone scans the
+     * picture). A fresh code is minted on every call, which is also what the
+     * refresh button needs.
+     */
+    async getLoginQRCode() {
+        const session = await this.login.startScanLogin();
+        const image = qrcode.renderDataUrl(session.url, { scale: 4, margin: 4 });
+        return {
+            id: "scan",
+            image: image.dataUrl,
+            url: session.url,
+            interval: session.interval,
+            expiresIn: session.expiresIn,
+        };
+    }
+
+    /**
+     * One poll of the scan. The renderer drives the interval so it can show
+     * the intermediate states; see LoginClient.pollScanLogin.
+     */
+    async checkLoginQRCode() {
+        const result = await this.login.pollScanLogin();
+        if (result.state === "confirmed") {
+            await this._completeInteractiveLogin();
+        }
+        return result;
+    }
+
+    /**
+     * Send an SMS code. A captcha challenge comes back as
+     * `{ captchaRequired: true }` rather than as a failure, because the UI has
+     * to render an input and retry rather than show an error.
+     */
+    async sendPhoneCode(phone, verifyCode) {
+        return this.login.sendSmsCode(String(phone || ""), verifyCode || "");
+    }
+
+    /** Verify the SMS code and finish the login. */
+    async loginWithPhone(credential) {
+        const cred = credential || {};
+        await this.login.loginWithSmsCode({
+            phone: String(cred.phone || ""),
+            code: String(cred.code || ""),
+            verifyCode: cred.verifyCode ? String(cred.verifyCode) : "",
+        });
+        return this._completeInteractiveLogin();
     }
 
     /**
@@ -876,34 +956,6 @@ class Application extends EventEmitter {
             vipType: vip.vipType || "",
             vipLevel: vip.vipLevel || 0,
         };
-    }
-
-    /*
-     * The three gaps below.
-     *
-     * Each one is a path whose server contract is known but whose client-side
-     * sequence is not: the recovered material lists the endpoints and the
-     * error codes, and stops there. They are registered so the login screen
-     * can say which piece is missing instead of a call to an unregistered
-     * name, which would come back as a bare null and read as "no such
-     * feature". The messages are the deliverable; a working implementation
-     * needs the reverse engineering, not more glue here.
-     */
-
-    getLoginQRCode() {
-        throw new Error("扫码登录尚未复刻：设备码协议（/v1/auth/device/code）未从原版还原");
-    }
-
-    checkLoginQRCode() {
-        throw new Error("扫码登录尚未复刻：没有二维码会话可供轮询");
-    }
-
-    sendPhoneCode() {
-        throw new Error("手机验证登录尚未复刻：发码请求体（/v1/auth/verification）未从原版还原");
-    }
-
-    loginWithPhone() {
-        throw new Error("手机验证登录尚未复刻：校验并登录的序列未从原版还原");
     }
 
     /** Called after a successful interactive login. */
@@ -1119,12 +1171,11 @@ class Application extends EventEmitter {
      * `GetDeviceIdOfWebSDKPlugin` hands the plugin; `numericVersion` is the
      * bare build number the header wants (`12.1.2.2662` -> `2662`).
      *
-     * The cookie is the honest gap: the drive authenticates with the session
-     * cookie, and this build's login calls go out over raw https without a
-     * cookie jar, so nothing ever writes one. The store is read anyway so that
-     * a cookie-capturing login can drop the value in one place and have the
-     * drive pick it up -- and an empty cookie is what makes the 401 classify
-     * as "not logged in" rather than as a mystery failure.
+     * The cookie is written by the login client: every login call now runs
+     * through a cookie jar, and the session cookie the account system sets is
+     * handed over here under `pan-cookie` (LoginClient._persistPanCookie).
+     * Before that the jar did not exist, nothing stored a cookie, and the
+     * drive could only ever answer 401.
      */
     panSession() {
         const peerId = this.getPeerId();

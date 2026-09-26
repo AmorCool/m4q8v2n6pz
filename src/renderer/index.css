@@ -237,6 +237,13 @@ body {
     margin-bottom: 14px;
 }
 
+/* The image-captcha field only exists once the server asks for it, so it has
+   to be hideable on its own -- `.is-hidden` is otherwise only defined for the
+   screen-level containers. */
+.captcha-field.is-hidden {
+    display: none;
+}
+
 .field-label {
     display: block;
     margin-bottom: 6px;

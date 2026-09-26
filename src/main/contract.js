@@ -305,9 +305,20 @@ const ENDPOINTS = Object.freeze({
     LOGIN_PATH_PING: "ping",
     LOGIN_PATH_SESSIONLOGIN: "sessionlogin",
     LOGIN_PATH_JUMPLOGIN: "jumplogin",
+    // The three interactive paths, spelled exactly as the shipped bundle
+    // spells them (main.js, quoted in LOGIN_PROTOCOL_SPEC.md sections 3 and 4).
+    LOGIN_PATH_LOGIN: "login",
+    LOGIN_PATH_SENDSMS: "sendsms",
+    LOGIN_PATH_SMSLOGIN: "smslogin",
+    /** The scan page the QR URL redirects to; GET, no body. */
+    LOGIN_PATH_QRLOGIN: "qrlogin",
 
     /** vas ids requested with getuserinfo; the VIP flags ride along here. */
     LOGIN_VAS_ID: "2,14,33,34,35",
+
+    /** Non-standard OAuth2 endpoint that turns a device-code token into a
+     *  session: GET appid / token / appname / devicesign (spec section 2A). */
+    SESSION_REGISTER: "/session/v1/register",
 
     // --- account center (OAuth2) ---------------------------------------------
     AUTH_SIGNIN: "/v1/auth/signin",
@@ -369,8 +380,39 @@ const PROTOCOL = Object.freeze({
     /** Provider string that tells the token endpoint the credential is a
      *  client-side session id rather than a password or auth code. */
     SESSION_TOKEN_PROVIDER: "access_end_point_token",
+    /** The RFC 8628 grant type the device-code scan flow polls with. */
+    DEVICE_CODE_GRANT: "urn:ietf:params:oauth:grant-type:device_code",
     REQUEST_ID_HEADER: "x-request-id",
     DEVICE_ID_HEADER: "x-device-id",
+});
+
+// ---------------------------------------------------------------------------
+// Login credentials
+// ---------------------------------------------------------------------------
+
+/**
+ * The values the shipped PC client is built with.
+ *
+ * appid/appkey are identifiers rather than secrets -- the original carries
+ * them in plain sight (out/main-renderer/renderer.js `getInitData`, spec
+ * section 9.1) and they are two of the four inputs to the device signature,
+ * so a wrong value changes the client's identity. The OAuth2 pair is the
+ * production tenant (spec section 9.2); the device-code and token endpoints
+ * reject a request without it.
+ *
+ * These are defaults. A build can still override them through config, which
+ * is why they are a named block rather than literals at the call sites.
+ */
+const LOGIN = Object.freeze({
+    APPID: "0",
+    APPKEY: "4af30ad6c6b0c02c4d8df3ded2cb79b8",
+    APP_NAME: "PC-com.xunlei.thunderx",
+    CLIENT_ID: "XW-G4v1H72tgfJym",
+    CLIENT_SECRET: "Qbaferw2knfQKqxa25EYJGtZ2_6755CMwzXBN3ctW54",
+    API_ORIGIN: "https://xluser-ssl.xunlei.com",
+    /** The QR page is served from a different host than the API; the device
+     *  code's verification URI is rewritten onto this one before encoding. */
+    QRLOGIN_HOST: "misc-xl9-ssl.xunlei.com",
 });
 
 // ---------------------------------------------------------------------------
@@ -430,6 +472,7 @@ module.exports = {
     KERNEL_EVENTS,
     ENDPOINTS,
     PROTOCOL,
+    LOGIN,
     VIP_CONFIG,
     USER_STATUS,
     VIP_TYPE_MAP,
