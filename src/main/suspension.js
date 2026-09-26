@@ -62,6 +62,11 @@ const SIZES = Object.freeze({
     autoHideAtX: 380,
     autoHideAtY: 226,
     ballSize: 52,
+    // The table names one ball size; the stylesheet draws it 52x56
+    // (`.xly-suspension-polygon{width:52px;height:56px}`), so the height is
+    // recorded here too. Using 52 for both put the panel 4px over the ball's
+    // bottom edge and the direction test 2px off centre.
+    ballHeight: 56,
     ballTop: 10,
     weltSize: 12,
     weltTopSize: 62,
@@ -70,16 +75,20 @@ const SIZES = Object.freeze({
 });
 
 /**
- * Two more numbers the clamp needs, neither of which is in that table.
+ * The ball's hit rectangle, from the stylesheet.
  *
- * 56x74 is `.xly-suspension-area`, the ball's hit rectangle, and 74 is what the
- * original's own clamp adds to `autoHideAtY` (out/main.js:302219). 84 is the
- * other literal in the same expression. Taking them from the stylesheet rather
- * than retyping keeps the two halves of the clamp from drifting.
+ * 56x74 is `.xly-suspension-area`, and 74 is the same literal the original's
+ * clamp adds to `autoHideAtY` (out/main.js:302219). This is what the clamp
+ * bounds -- see `clampToWorkArea`.
  */
 const HIT_WIDTH = 56;
 const HIT_HEIGHT = 74;
-const EDGE_MARGIN = 84;
+
+/** Fallback work area for a caller that has no display to ask. */
+const DEFAULT_WORK_AREA = Object.freeze({ x: 0, y: 0, width: 1920, height: 1080 });
+
+/** How far the ball sits from the corner it starts in. */
+const DEFAULT_MARGIN = 8;
 
 /**
  * Window options for both the ball and the panel.
@@ -135,38 +144,49 @@ const TASK_STATUS = Object.freeze({
 // ---------------------------------------------------------------------------
 
 /**
- * Keep the ball inside the work area.
+ * Keep the ball where it can be grabbed.
  *
- * This is the original's `verify suspension pos` (out/main.js:302219) with its
- * constants substituted. It is a translation, not a re-derivation, because the
- * asymmetry is deliberate: the horizontal test measures against
- * `autoHideAtX` (380) while the horizontal correction also subtracts the 84px
- * margin, and the vertical test and correction both use `autoHideAtY` (226) --
- * except the correction adds the 74px hit height instead of a symmetric 226.
- * "Fixing" it into something tidier would move the ball to a different corner
- * than the original picks.
+ * What is clamped is the ball's 56x74 hit rectangle, not the 400x262 window.
+ * The window is mostly transparent -- the ball is a 52x56 hexagon at its
+ * top-left -- so bounding the window holds the ball hundreds of pixels away
+ * from the edge it is meant to hug.
  *
- * @param {{x:number, y:number}} pos        desired top-left, in DIP
+ * This replaces a literal transcription of the original's clamp
+ * (out/main.js:302219), which read its constants as window bounds:
+ *
+ *     if (x + 380 < area.x)          x = area.x - 380;
+ *     else if (x + 380 + 84 > right) x = right - 84 - 380;
+ *
+ * Taken that way the ball cannot be placed in the right 464px or the bottom
+ * 300px of the screen, and the default position lands exactly on that
+ * boundary -- so a short drag toward the corner snaps straight back to where
+ * it started. That is the reported bug ("一点就回到原位"), and it is a fault in
+ * the transcription rather than a property of the original: a floating ball
+ * that cannot reach a quarter of the screen is not something anyone ships.
+ * The same reading also lets the ball go 380px off the left edge, where it is
+ * invisible and unreachable -- the giveaway that the constants are not bounds.
+ *
+ * The original's constants are kept in SIZES as the record of what it names.
+ * autoHideAtX / autoHideAtY are its auto-hide distances, a feature this build
+ * does not have; the 84 in the same expression is the sliver it leaves at the
+ * trailing edge. Neither can be a bound here without putting the ball beyond
+ * the reach of the pointer.
+ *
+ * @param {{x:number, y:number}} pos        desired ball top-left, in DIP
  * @param {{x:number,y:number,width:number,height:number}} workArea
  * @returns {{x:number, y:number}}
  */
 function clampToWorkArea(pos, workArea) {
-    const area = workArea || { x: 0, y: 0, width: 1920, height: 1080 };
-    const result = { x: Math.round(pos.x), y: Math.round(pos.y) };
+    const area = workArea || DEFAULT_WORK_AREA;
+    // `Math.max(area.x, ...)` guards a work area narrower than the ball: the
+    // lower bound has to win, or the ball would be pushed off the far side.
+    const maxX = Math.max(area.x, area.x + area.width - HIT_WIDTH);
+    const maxY = Math.max(area.y, area.y + area.height - HIT_HEIGHT);
 
-    if (pos.x + SIZES.autoHideAtX < area.x) {
-        result.x = area.x - SIZES.autoHideAtX;
-    } else if (pos.x + SIZES.autoHideAtX + EDGE_MARGIN > area.x + area.width) {
-        result.x = area.x + area.width - EDGE_MARGIN - SIZES.autoHideAtX;
-    }
-
-    if (pos.y + SIZES.autoHideAtY < area.y) {
-        result.y = area.y - SIZES.autoHideAtY;
-    } else if (pos.y + SIZES.autoHideAtY + HIT_HEIGHT > area.y + area.height) {
-        result.y = area.y + area.height - SIZES.autoHideAtY - HIT_HEIGHT;
-    }
-
-    return result;
+    return {
+        x: Math.round(Math.min(Math.max(pos.x, area.x), maxX)),
+        y: Math.round(Math.min(Math.max(pos.y, area.y), maxY)),
+    };
 }
 
 /**
@@ -241,18 +261,56 @@ function panelPosition(anchor, size, direction) {
 }
 
 /**
- * Where the panel hangs from, in screen coordinates.
+ * The ball's centre, in screen coordinates.
  *
- * The anchor is the ball's centre, not the window's corner: the ball window is
+ * Used to decide which way there is room for the panel. The ball window is
  * 400x262 and the ball is a 52x56 hexagon at `top: 10px; left: 0`, so the
- * window's corner is up to 200px away from the thing the panel should touch.
+ * window's own centre is up to 200px away from the thing being reasoned about.
  */
 function ballAnchor(ballBounds) {
     const ball = ballBounds || { x: 0, y: 0 };
     return {
         x: ball.x + SIZES.ballSize / 2,
-        y: ball.y + SIZES.ballTop + SIZES.ballSize / 2,
+        y: ball.y + SIZES.ballTop + SIZES.ballHeight / 2,
     };
+}
+
+/**
+ * The corner of the ball the panel hangs from.
+ *
+ * Anchoring the panel at the ball's *centre* -- which is what this did first --
+ * puts the panel on top of the ball. A 400px panel whose top-left is the ball's
+ * centre covers the ball's bottom-right quadrant, which is exactly where the
+ * pointer is when the user reaches for it: the press then lands on the panel
+ * window instead of the ball window, and the ball cannot be dragged at all.
+ * A real run showed the ball at (200,200) with the panel placed at (226,236).
+ *
+ * Anchoring at the ball's edge puts the panel beside it: touching, so the
+ * pointer can travel from one to the other without crossing a gap that would
+ * fire the ball's `leave` first, but never covering it.
+ *
+ * @param {{x:number,y:number}} ballBounds  the ball window's position
+ * @param {number} direction                a FloatPanelDirection value
+ * @returns {{x:number, y:number}}
+ */
+function ballPanelAnchor(ballBounds, direction) {
+    const ball = ballBounds || { x: 0, y: 0 };
+    const left = ball.x;
+    const right = ball.x + SIZES.ballSize;
+    const top = ball.y + SIZES.ballTop;
+    const bottom = ball.y + SIZES.ballTop + SIZES.ballHeight;
+
+    switch (direction) {
+        case FloatPanelDirection.LeftTop:
+            return { x: left, y: bottom };
+        case FloatPanelDirection.LeftBottom:
+            return { x: left, y: top };
+        case FloatPanelDirection.RightTop:
+            return { x: right, y: bottom };
+        case FloatPanelDirection.RightBottom:
+        default:
+            return { x: right, y: top };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,11 +448,14 @@ class SuspensionService {
             if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
                 target = { x: saved.x, y: saved.y };
             } else {
-                // Bottom-right, the corner the original ships the ball in: the
-                // clamp's own arithmetic is what puts it there.
+                // Bottom-right, the corner the original ships the ball in: a
+                // small inset from the corner the clamp allows, so the ball is
+                // not jammed against the edge and is not already sitting on the
+                // clamp boundary (which is what made a short drag look like a
+                // snap-back).
                 target = {
-                    x: workArea.x + workArea.width - SIZES.autoHideAtX - EDGE_MARGIN,
-                    y: workArea.y + workArea.height - SIZES.autoHideAtY - HIT_HEIGHT,
+                    x: workArea.x + workArea.width - HIT_WIDTH - DEFAULT_MARGIN,
+                    y: workArea.y + workArea.height - HIT_HEIGHT - DEFAULT_MARGIN,
                 };
             }
         }
@@ -484,7 +545,7 @@ class SuspensionService {
         const bounds = ball ? ball.getBounds() : { x: 0, y: 0, width: WINDOW_OPTIONS.width, height: WINDOW_OPTIONS.height };
         const display = this.getDisplayForPoint(bounds.x, bounds.y);
         const direction = chooseDirection(bounds, display.workArea);
-        const anchor = ballAnchor(bounds);
+        const anchor = ballPanelAnchor(bounds, direction);
         const wanted = panelPosition(anchor, { width: WINDOW_OPTIONS.width, height: WINDOW_OPTIONS.height }, direction);
         const pos = clampToWorkArea(wanted, display.workArea);
 
@@ -954,7 +1015,6 @@ module.exports = {
     SIZES,
     HIT_WIDTH,
     HIT_HEIGHT,
-    EDGE_MARGIN,
     FloatPanelDirection,
     SkinType,
     TASK_STATUS,
@@ -963,5 +1023,6 @@ module.exports = {
     chooseDirection,
     panelPosition,
     ballAnchor,
+    ballPanelAnchor,
     defaultStatusText,
 };

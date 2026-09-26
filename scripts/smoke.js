@@ -1772,6 +1772,7 @@ async function engineReady(engine, deadlineMs) {
         assert.strictEqual(suspension.SIZES.autoHideAtX, 380);
         assert.strictEqual(suspension.SIZES.autoHideAtY, 226);
         assert.strictEqual(suspension.SIZES.ballSize, 52);
+        assert.strictEqual(suspension.SIZES.ballHeight, 56, "the hexagon is 52 wide and 56 tall");
         assert.strictEqual(suspension.SIZES.ballTop, 10);
         assert.strictEqual(suspension.SIZES.weltSize, 12);
         assert.strictEqual(suspension.SIZES.weltTopSize, 62);
@@ -1781,21 +1782,26 @@ async function engineReady(engine, deadlineMs) {
         assert.strictEqual(suspension.WINDOW_OPTIONS.height, 262);
     });
 
-    test("the clamp is the original's, constants and all", () => {
+    test("the clamp keeps the whole ball on screen, so it can always be grabbed", () => {
         const area = { x: 0, y: 0, width: 1920, height: 1080 };
-        // Off the bottom-right: x - 84 - 380, y - 226 - 74.
+        // Off the bottom-right: the ball's 56x74 hit rectangle is pulled back
+        // until it is fully inside. A literal reading of the original's
+        // expression (window bounds, -84-380 / -226-74) left the ball unable to
+        // reach the right 464px or the bottom 300px, which is where the
+        // reported snap-back came from.
         assert.deepStrictEqual(suspension.clampToWorkArea({ x: 5000, y: 5000 }, area), {
-            x: 1920 - 84 - 380,
-            y: 1080 - 226 - 74,
+            x: 1920 - 56,
+            y: 1080 - 74,
         });
-        // Off the top-left: the correction is negative, and deliberately so --
-        // the original lets the ball hang past the corner by autoHideAtX/Y.
-        assert.deepStrictEqual(suspension.clampToWorkArea({ x: -5000, y: -5000 }, area), {
-            x: -380,
-            y: -226,
-        });
+        // Off the top-left: the ball is brought fully on screen rather than
+        // left hanging 380px past the edge where it cannot be clicked.
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: -5000, y: -5000 }, area), { x: 0, y: 0 });
         // A spot with room on every side is left alone.
         assert.deepStrictEqual(suspension.clampToWorkArea({ x: 400, y: 300 }, area), { x: 400, y: 300 });
+        // Every point of the work area is reachable: the far corner and the
+        // near corner both survive.
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: 1864, y: 1006 }, area), { x: 1864, y: 1006 });
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: 1000, y: 500 }, area), { x: 1000, y: 500 });
     });
 
     test("the panel offset matches setFloatPanelDirection", () => {
@@ -1817,8 +1823,30 @@ async function engineReady(engine, deadlineMs) {
 
     test("the ball's anchor is the hexagon's centre, not the window's", () => {
         // The ball is at top:10px, left:0 and is 52x56, so its centre is 26px in
-        // and 36px down -- not the 200,131 a window-centred anchor would give.
-        assert.deepStrictEqual(suspension.ballAnchor({ x: 100, y: 50 }), { x: 126, y: 86 });
+        // and 10+28=38px down -- not the 200,131 a window-centred anchor gives.
+        assert.deepStrictEqual(suspension.ballAnchor({ x: 100, y: 50 }), { x: 126, y: 88 });
+    });
+
+    test("the panel hangs off the ball's edge, never over it", () => {
+        const D = suspension.FloatPanelDirection;
+        const ball = { x: 1000, y: 600 };
+        // The ball occupies x 1000..1052, y 610..666 in screen coordinates.
+        const cases = [
+            [D.RightBottom, { x: 1052, y: 610 }],
+            [D.RightTop, { x: 1052, y: 666 }],
+            [D.LeftBottom, { x: 1000, y: 610 }],
+            [D.LeftTop, { x: 1000, y: 666 }],
+        ];
+        for (const [direction, expected] of cases) {
+            assert.deepStrictEqual(suspension.ballPanelAnchor(ball, direction), expected);
+            // And the panel that hangs from that corner does not cover the ball.
+            const pos = suspension.panelPosition(expected, { width: 400, height: 262 }, direction);
+            const panel = { x: pos.x, y: pos.y, width: 400, height: 262 };
+            const overlaps =
+                panel.x < ball.x + 52 && ball.x < panel.x + panel.width &&
+                panel.y < ball.y + 66 && ball.y + 10 < panel.y + panel.height;
+            assert.strictEqual(overlaps, false, `direction ${direction} must not cover the ball`);
+        }
     });
 
     /** A registry stub: records sends, positions and show/hide per window. */
@@ -1910,7 +1938,10 @@ async function engineReady(engine, deadlineMs) {
         });
         const win = svc.startSuspensionWindow({ x: null, y: null });
         win.fireOnce("ready-to-show");
-        assert.deepStrictEqual(win.lastPosition, { x: 1456, y: 780 });
+        // Bottom-right, inset by 8px -- deliberately NOT on the clamp boundary,
+        // because a default that sits exactly on the boundary is what made a
+        // short drag toward the corner look like a snap back to the start.
+        assert.deepStrictEqual(win.lastPosition, { x: 1920 - 56 - 8, y: 1080 - 74 - 8 });
         assert.strictEqual(win.shown, 1);
     });
 
@@ -1942,9 +1973,9 @@ async function engineReady(engine, deadlineMs) {
         assert.deepStrictEqual(win.lastPosition, { x: 5000, y: 5000 });
 
         svc.handleAction({ type: "dragEnd", x: 5000, y: 5000 });
-        assert.deepStrictEqual(win.lastPosition, { x: 1456, y: 780 });
+        assert.deepStrictEqual(win.lastPosition, { x: 1920 - 56, y: 1080 - 74 });
         assert.strictEqual(saved.length, 1);
-        assert.deepStrictEqual(saved[0], { x: 1456, y: 780 });
+        assert.deepStrictEqual(saved[0], { x: 1920 - 56, y: 1080 - 74 });
     });
 
     test("the ball's click raises, dismisses or restores the main window", () => {
@@ -1986,9 +2017,17 @@ async function engineReady(engine, deadlineMs) {
         assert.ok(panel, "the panel window must exist");
         assert.strictEqual(panel.shown, 1);
         assert.strictEqual(ball.ignoreMouse.ignore, false, "clicks must reach the ball while it is hovered");
-        // Ball at 1400,700 -> anchor 1426,736, which is in the right/bottom
-        // quadrant, so the panel goes left and up: LeftTop.
-        assert.deepStrictEqual(panel.lastPosition, { x: 1426 - 400, y: 736 - 262 });
+        // Ball at 1400,700 -> its centre (1426,738) is in the right/bottom
+        // quadrant, so the panel goes left and up (LeftTop) and hangs off the
+        // ball's bottom-left corner at (1400,766): 1400-400, 766-262.
+        assert.deepStrictEqual(panel.lastPosition, { x: 1000, y: 504 });
+        // The point of the anchor change: the panel must not cover the ball, or
+        // the press meant for the ball lands on the panel window instead.
+        const panelBox = { x: 1000, y: 504, width: 400, height: 262 };
+        const overlaps =
+            panelBox.x < 1400 + 52 && 1400 < panelBox.x + 400 &&
+            panelBox.y < 700 + 66 && 700 + 10 < panelBox.y + 262;
+        assert.strictEqual(overlaps, false, "the panel must sit beside the ball, not over it");
 
         svc.handleAction({ type: "leave" });
         assert.strictEqual(ball.ignoreMouse.ignore, true, "clicks must pass through again once the pointer leaves");
@@ -2171,7 +2210,17 @@ async function engineReady(engine, deadlineMs) {
 
         // A press that moves is a drag; the window origin is screen - client,
         // so the new origin is (1000-20, 500-20) shifted by the pointer's move.
-        byId["hit"].dispatch("mousedown", { button: 0, screenX: 1000, screenY: 500, clientX: 20, clientY: 20 });
+        // `preventDefault` must be called, or the browser can turn the press
+        // into a native drag and swallow the mousemove stream the drag needs.
+        let pressPrevented = 0;
+        const press = (type, sx, sy, cx, cy) => ({
+            button: 0, screenX: sx, screenY: sy, clientX: cx, clientY: cy,
+            preventDefault() {
+                pressPrevented += 1;
+            },
+        });
+        byId["hit"].dispatch("mousedown", press("mousedown", 1000, 500, 20, 20));
+        assert.strictEqual(pressPrevented, 1, "mousedown must preventDefault");
         page.dom.documentStub.dispatch("mousemove", { clientX: 40, clientY: 30, screenX: 1020, screenY: 510 });
         const drag = page.actions[page.actions.length - 1];
         assert.strictEqual(drag.type, "drag");
@@ -2181,7 +2230,7 @@ async function engineReady(engine, deadlineMs) {
         assert.strictEqual(page.actions[page.actions.length - 1].type, "dragEnd");
 
         // A press that does not move is a click.
-        byId["hit"].dispatch("mousedown", { button: 0, screenX: 1000, screenY: 500, clientX: 20, clientY: 20 });
+        byId["hit"].dispatch("mousedown", press("mousedown", 1000, 500, 20, 20));
         page.dom.documentStub.dispatch("mouseup", {});
         assert.strictEqual(page.actions[page.actions.length - 1].type, "leftClick");
 

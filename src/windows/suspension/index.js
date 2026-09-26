@@ -133,6 +133,17 @@ function isInsideBall(x, y) {
 
 function onMouseDown(event) {
     if (event.button !== 0) return;
+    /*
+     * Stop the press from becoming a native drag or a text selection.
+     *
+     * Either one takes the pointer capture away from the page, and with it the
+     * `mousemove` stream the drag is built on: the window would never move and
+     * the gesture would look like a dead ball. Nothing here is draggable and
+     * the body is `user-select: none`, but relying on that is relying on a
+     * stylesheet staying correct.
+     */
+    if (typeof event.preventDefault === "function") event.preventDefault();
+
     state.dragging = true;
     state.moved = false;
     state.last = null;
