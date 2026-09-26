@@ -693,11 +693,71 @@ class Aria2Engine extends EventEmitter {
 
     pause(taskId) {
         const gid = this.gidByTask.get(taskId);
-        if (!gid || !this.rpc) return;
+        if (!gid || !this.rpc) return undefined;
         // forcePause rather than pause: the plain form waits for the current
         // piece to finish, which on a slow peer can take a long time and makes
         // the UI look unresponsive.
-        this.rpc.call("aria2.forcePause", [gid]).catch((err) => this.log("pause failed:", err.message));
+        //
+        // The promise is returned so a caller that has to *know* the task has
+        // stopped before doing something else can await it. The magnet
+        // pre-parse is exactly that caller: it pauses the moment metadata
+        // lands, and selecting files while the task is still active is the
+        // one ordering aria2 does not honour.
+        return this.rpc
+            .call("aria2.forcePause", [gid])
+            .catch((err) => this.log("pause failed:", err.message));
+    }
+
+    /**
+     * Wait for the aria2 gid behind a task.
+     *
+     * `addTask` hands back a task id before aria2 has been told about the
+     * download, so a caller that adds a task and immediately acts on it finds
+     * no gid. That is not a race worth papering over with a sleep: the gid
+     * appears when the RPC call lands, and this waits for exactly that.
+     */
+    async _awaitGid(taskId, deadlineMs = 15000) {
+        const deadline = Date.now() + deadlineMs;
+        for (;;) {
+            const gid = this.gidByTask.get(taskId);
+            if (gid) return gid;
+            if (Date.now() > deadline) return "";
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+    }
+
+    /**
+     * Choose which files of a torrent to download.
+     *
+     * `indices` are aria2's own 1-based file numbers (`files[].index`), not
+     * array positions. The two differ by one and mixing them silently selects
+     * the wrong files, so the caller is expected to pass `file.index` straight
+     * through.
+     *
+     * The task has to be paused for the change to take: `select-file` alters
+     * the download's options, and aria2 applies them when the task next runs,
+     * so an active task would keep fetching the files that were just
+     * deselected. Callers resume afterwards.
+     *
+     * @returns {Promise<boolean>} whether the selection was accepted
+     */
+    async selectFiles(taskId, indices) {
+        const gid = await this._awaitGid(taskId);
+        if (!gid || !this.rpc) return false;
+        const list = (indices || [])
+            .map((n) => Number(n))
+            .filter((n) => Number.isFinite(n) && n > 0);
+        if (!list.length) return false;
+        try {
+            await this.rpc.call("aria2.changeOption", [
+                gid,
+                { "select-file": list.join(",") },
+            ]);
+            return true;
+        } catch (err) {
+            this.log("selectFiles failed:", err.message);
+            return false;
+        }
     }
 
     /**

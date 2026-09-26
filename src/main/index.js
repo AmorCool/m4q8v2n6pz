@@ -48,6 +48,24 @@ const DEFAULT_PROJECT_ID = "2rvk4e3gkdnl7u1kl0k";
 const DEFAULT_CLIENT_ID = "XXDfQA-ruQKfza9f";
 const DEFAULT_CLIENT_SECRET = "jXD0dQ-nm_yybCfqj7EqUKQtp6sc5q1kzodIj96Gfq0";
 
+/*
+ * Magnet pre-parse timing.
+ *
+ * A magnet link carries an infohash and nothing else, so the file list only
+ * exists once aria2 has met a peer and pulled the info dictionary down. DHT
+ * lookup plus the first peer handshake is routinely several seconds and can be
+ * much longer on a cold table, which is why the window shows an indeterminate
+ * bar rather than a percentage.
+ *
+ * 30 seconds is the ceiling before the window offers the degraded path
+ * ("create without choosing files"). The limit is not about how long a
+ * resolution may take -- it may take longer and still succeed -- it is about
+ * how long a person will look at a spinner before deciding the window is
+ * broken.
+ */
+const PREPARSE_TIMEOUT_MS = 30000;
+const PREPARSE_POLL_MS = 500;
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -198,6 +216,17 @@ class Application extends EventEmitter {
         this.plugins = new Map();
         // Views a plugin asked for before a renderer existed to mount them.
         this.pendingWebviews = [];
+        /*
+         * The save directory the user last committed a task to.
+         *
+         * Held in memory only, like the task table and for the same reason:
+         * this build has no persistence layer. The effect is that the dialog
+         * remembers the folder for the rest of the session, which is the part
+         * of "remember my last folder" a user actually notices.
+         */
+        this.lastDownloadDir = "";
+        /** The magnet pre-parse in flight, if any: { url, startedAt }. */
+        this._preparse = null;
         this.started = false;
     }
 
@@ -394,6 +423,20 @@ class Application extends EventEmitter {
             [F.DELETE_TASK]: fromPlugin(async (taskId) => this.kernel.removeTask(taskId)),
             [F.GET_TASK_BASE_INFO]: fromPlugin(async (taskId) => this.kernel.getTask(taskId)),
             [F.GET_ALL_TASK_BASE_INFO]: fromPlugin(async () => this.kernel.getAllTasks()),
+
+            /*
+             * The new-task window's two engine-facing calls.
+             *
+             * `PreDownload` is not a download: it is the metadata step, which
+             * only a magnet link needs. `CreateNewTaskEx` is the create that
+             * can carry a file selection. Both are registered here rather than
+             * beside the window because they are engine work, and the window
+             * is a caller like any other.
+             */
+            [F.PRE_DOWNLOAD]: fromPlugin(async (spec, dir) => this.preDownload(spec, dir)),
+            [F.PRE_DOWNLOADING]: fromPlugin(async () => this.isPreDownloading()),
+            [F.CREATE_NEW_TASK_EX]: fromPlugin(async (spec, indices) =>
+                this.createTaskEx(spec, indices)),
         });
     }
 
@@ -852,6 +895,168 @@ class Application extends EventEmitter {
     _fireLoginEvent(name, args) {
         this.mesh.main.fireServerEvent(name, args);
         this.mesh.renderer.fireServerEvent(name, args);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task creation for the new-task window
+    // -----------------------------------------------------------------------
+
+    /**
+     * Resolve a magnet link's file list before the download is committed.
+     *
+     * A magnet link is an infohash, not a download: aria2 has no file names,
+     * no sizes and no total length until it has fetched the info dictionary
+     * from a peer. The user cannot choose files until that has happened, so
+     * this waits for it and hands back the list.
+     *
+     * Two things about the shape are deliberate:
+     *
+     *   1. The task is created for real, through the kernel. The file list has
+     *      to be read off an aria2 gid, and `select-file` later applies to
+     *      that same gid -- there is no way to "look without creating". The
+     *      cost is that cancelling the dialog leaves one paused task behind,
+     *      which the user can delete; the alternative was a second copy of the
+     *      download and a file selection that applied to neither.
+     *
+     *   2. It is added *active* and paused once the metadata lands, which is
+     *      the opposite of what "pre-parse without downloading" suggests. A
+     *      task added paused never contacts a peer, so its metadata never
+     *      arrives and the wait could only ever time out. The window between
+     *      the metadata arriving and the pause is one poll interval, which is
+     *      the most that can be done without aria2's metadata-only mode.
+     *
+     * @param {object|string} spec `{ url }` for a magnet or a .torrent URL,
+     *                             `{ torrentPath }` for a local .torrent file
+     * @param {string} [dir]
+     * @returns {Promise<object>} `{ ok, taskId, files, ... }`, or
+     *          `{ ok: false, reason }` with `reason` one of
+     *          "empty" / "engine-unavailable" / "timeout".
+     */
+    async preDownload(spec, dir) {
+        // A bare string is accepted so the window can send the common case
+        // without wrapping it, and so a caller reading the original's
+        // `PreDownload(url)` signature is not surprised.
+        const source = typeof spec === "string" ? { url: spec } : spec || {};
+        const url = source.url || "";
+        const torrentPath = source.torrentPath || "";
+        if (!url && !torrentPath) return { ok: false, reason: "empty" };
+        if (dir) this.lastDownloadDir = dir;
+
+        const engine = this.kernel.engine;
+        // Checked before the task exists: with the stub engine there is
+        // nothing to ask, and creating a task that can never resolve would
+        // leave the list showing a download nobody asked for.
+        if (typeof engine.describe !== "function") {
+            return { ok: false, reason: "engine-unavailable" };
+        }
+
+        this._preparse = { url: url || torrentPath, startedAt: Date.now() };
+        /*
+         * A local .torrent already carries the file list, so it can be added
+         * paused -- nothing has to be fetched for the metadata to exist. A
+         * magnet is the other way round and is added active for the reason
+         * given above.
+         */
+        const taskId = this.kernel.addTask({
+            url,
+            torrentPath,
+            dir,
+            startNow: torrentPath ? false : true,
+        });
+
+        try {
+            const deadline = Date.now() + PREPARSE_TIMEOUT_MS;
+            for (;;) {
+                const detail = await engine.describe(taskId).catch(() => null);
+                if (detail && (detail.btTitle || detail.totalSize > 0)) {
+                    // Hold it: nothing should be written while the user is
+                    // choosing, and the selection only takes effect on a task
+                    // that is not running.
+                    if (typeof engine.pause === "function") {
+                        await engine.pause(taskId);
+                    }
+                    return {
+                        ok: true,
+                        taskId,
+                        title: detail.btTitle || "",
+                        infoId: detail.infoId || "",
+                        totalSize: detail.totalSize || 0,
+                        files: detail.files || [],
+                    };
+                }
+                if (Date.now() > deadline) {
+                    this.log.warning("magnet pre-parse timed out");
+                    // The task stays as it is -- active, with no metadata yet.
+                    // Removing it would throw away a resolution that may still
+                    // be about to succeed, and the window offers to keep it.
+                    return { ok: false, reason: "timeout", taskId };
+                }
+                await new Promise((resolve) => setTimeout(resolve, PREPARSE_POLL_MS));
+            }
+        } finally {
+            this._preparse = null;
+        }
+    }
+
+    /**
+     * Whether a magnet pre-parse is in flight.
+     *
+     * The recovered material lists `PreDownloading` next to `PreDownload`
+     * without recording what it answers (IPC_CONTRACT.md:256), so this is the
+     * reading that needs no invention: the question a caller can ask about a
+     * running pre-parse is whether there is one. It exists so the name is live
+     * rather than a string that resolves to null.
+     */
+    isPreDownloading() {
+        return !!this._preparse;
+    }
+
+    /**
+     * Create a task, optionally restricting a torrent to chosen files.
+     *
+     * Two cases, and the difference matters:
+     *
+     *   - The spec carries a `taskId` from a pre-parse. That task already
+     *     exists and holds the metadata the user just looked at, so it is
+     *     adopted rather than re-created. Creating a second one would leave
+     *     the paused original in the list and apply the selection to neither.
+     *
+     *   - There is no `taskId`: a plain link, or a torrent that was not
+     *     pre-parsed. When files were chosen it is created paused and resumed
+     *     after the selection lands, because aria2 only honours `select-file`
+     *     on a task that is not running.
+     *
+     * @param {object} spec     the engine's task spec, plus optional `taskId`
+     * @param {number[]} [indices] aria2's 1-based `files[].index` values
+     * @returns {Promise<string>} the task id
+     */
+    async createTaskEx(spec, indices) {
+        const source = spec || {};
+        if (source.dir) this.lastDownloadDir = source.dir;
+
+        const engine = this.kernel.engine;
+        const selection = Array.isArray(indices)
+            ? indices.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+            : [];
+        const wantsStart = source.startNow !== false;
+        const canSelect = selection.length > 0 && typeof engine.selectFiles === "function";
+
+        if (source.taskId && this.kernel.getTask(source.taskId)) {
+            const taskId = source.taskId;
+            if (canSelect) await engine.selectFiles(taskId, selection);
+            if (wantsStart) this.kernel.startTask(taskId);
+            else this.kernel.pauseTask(taskId);
+            return taskId;
+        }
+
+        const taskId = this.kernel.addTask(
+            Object.assign({}, source, { startNow: canSelect ? false : wantsStart })
+        );
+        if (canSelect) {
+            await engine.selectFiles(taskId, selection);
+            if (wantsStart) this.kernel.startTask(taskId);
+        }
+        return taskId;
     }
 
     async stop() {

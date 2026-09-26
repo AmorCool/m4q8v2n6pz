@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>新建任务</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!--
+        The new-task dialog.
+
+        Rows top to bottom: title bar, the link box, an optional torrent-source
+        row, the file list, and the fixed footer. Only the file list is
+        elastic; everything else is a fixed height so that the dialog can be
+        non-resizable without clipping. The original's own dialog size is not
+        in the recovered material, so 560x620 is a choice, not a measurement.
+
+        The title bar is drawn here rather than by the OS because the window is
+        a plain framed BrowserWindow in this build -- one code path for both
+        the dialog and the main window -- and a dialog that drew its own
+        header was cheaper than a second window configuration.
+    -->
+    <div class="window">
+        <header class="titlebar">
+            <span class="titlebar-title">新建任务</span>
+            <button id="close" class="titlebar-close" type="button" title="关闭">×</button>
+        </header>
+
+        <div class="body">
+            <!-- Link box. Multi-line on purpose: the batch case is a list of
+                 links, one per line, and a single-line input would silently
+                 drop all but the first. -->
+            <section class="links">
+                <textarea id="links" rows="3" spellcheck="false"
+                          placeholder="粘贴下载链接，可多行，支持 http/https、磁力链、ed2k"></textarea>
+                <div class="links-foot">
+                    <span id="link-count" class="hint"></span>
+                    <span class="links-actions">
+                        <button id="pick-torrent" class="mini" type="button">选择种子</button>
+                        <button id="paste" class="mini" type="button">粘贴</button>
+                        <button id="clear" class="mini" type="button">清空</button>
+                    </span>
+                </div>
+            </section>
+
+            <!-- Torrent source. Shown only when the source is a torrent file:
+                 a .torrent URL, or a file the user picked. A magnet needs no
+                 row -- the link itself is already in the box above. -->
+            <section id="source" class="source is-hidden">
+                <span class="source-icon" aria-hidden="true">▤</span>
+                <span id="source-name" class="source-name"></span>
+                <button id="source-pick" class="mini" type="button">重新选择</button>
+            </section>
+
+            <!-- BT file list. Present only for a torrent or magnet task. -->
+            <section id="files" class="files is-hidden">
+                <div id="files-head" class="files-head is-hidden">
+                    <label class="check files-check">
+                        <input id="files-all" type="checkbox" checked> 全选
+                    </label>
+                    <span class="files-name">文件名</span>
+                    <span class="files-size">大小</span>
+                    <span class="files-progress">进度</span>
+                </div>
+
+                <!-- Indeterminate bar: the metadata fetch has no percentage
+                     to show, and a determinate bar sitting at 0% would read
+                     as "stuck" rather than "working". -->
+                <div id="files-loading" class="files-loading">
+                    <div class="indeterminate"><i></i></div>
+                    <p id="files-status">正在解析种子信息…</p>
+                </div>
+
+                <div id="files-list" class="files-list is-hidden"></div>
+            </section>
+
+            <p id="error" class="error is-hidden"></p>
+            <p id="notice" class="notice is-hidden"></p>
+        </div>
+
+        <footer class="footer">
+            <div class="row">
+                <span class="label">保存到</span>
+                <input id="dir" class="path" type="text" readonly>
+                <button id="browse" class="mini" type="button">浏览</button>
+            </div>
+            <div class="row">
+                <span class="label">文件名</span>
+                <input id="out" class="path" type="text" spellcheck="false"
+                       placeholder="默认使用链接中的文件名">
+            </div>
+            <div class="row">
+                <label class="check">
+                    <input id="start-now" type="checkbox" checked> 立即开始下载
+                </label>
+            </div>
+            <div class="row row-actions">
+                <button id="cancel" class="ghost" type="button">取消</button>
+                <button id="submit" class="primary" type="button" disabled>立即下载</button>
+            </div>
+        </footer>
+    </div>
+
+    <!--
+        Right-click menu, drawn in the page.
+
+        The original's menu item is "粘贴并立即下载" (read off the recovered
+        bundle). A native Electron menu would need another IPC round trip to
+        build, and the three items here need nothing the page cannot do
+        itself -- so it is a positioned list rather than a `Menu`.
+    -->
+    <div id="menu" class="menu is-hidden">
+        <button class="menu-item" type="button" data-action="paste">粘贴</button>
+        <button class="menu-item" type="button" data-action="paste-download">粘贴并立即下载</button>
+        <button class="menu-item" type="button" data-action="clear">清空</button>
+    </div>
+
+    <script src="index.js"></script>
+</body>
+</html>

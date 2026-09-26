@@ -186,6 +186,27 @@ const SERVER_FUNCTIONS = Object.freeze({
     GET_TASK_BASE_INFO: "GetTaskBaseInfo",
     GET_ALL_TASK_BASE_INFO: "GetAllTaskBaseInfo",
 
+    // --- task: the new-task window --------------------------------------------
+    //
+    // The original ships this as a native window (`ThunderNewTask`) plus two
+    // renderers, and the command names below are read off the released bundle
+    // (IPC_CONTRACT.md:243-244, :256). Keeping the original names means the
+    // window can later be split into `pre-new-task` and `new-task` without
+    // touching the contract -- only which window answers would move.
+    //
+    // `PreDownload` is the magnet pre-parse step: a magnet link carries no
+    // file list, so the file names have to be read back from the engine after
+    // it has met a peer. `CreateNewTaskEx` is the create that carries the
+    // user's file selection.
+    CREATE_PRE_NEW_TASK_WINDOW: "CreatePreNewTaskWindow",
+    PRE_DOWNLOAD: "PreDownload",
+    PRE_DOWNLOADING: "PreDownloading",
+    CREATE_NEW_TASK_EX: "CreateNewTaskEx",
+    // The save directory is chosen by a native dialog, which only the main
+    // process can open. One name with a `kind` argument rather than two names,
+    // because the two dialogs differ only by their filter.
+    PICK_DIRECTORY: "PickDirectory",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",
@@ -202,6 +223,11 @@ const NATIVE_EVENTS = Object.freeze({
     ON_GET_USER_INFO_FINISHED: "onGetUserInfoFinished",
     ON_LOGOUT: "onLogout",
     ON_USER_DETAIL_INFO_CHANGE: "onUserDetailInfoChange",
+    // Delivered to the new-task window once its page is up. The prefill
+    // (a link copied from the main window, or a magnet picked up from the
+    // clipboard) has to wait for the page: the window is created before its
+    // renderer exists, so sending at open time would reach nobody.
+    ON_NEW_TASK_PREFILL: "onNewTaskPrefill",
 });
 
 /** Download kernel events, forwarded verbatim to the JS side. */

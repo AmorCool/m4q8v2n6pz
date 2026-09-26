@@ -164,19 +164,35 @@ class ThunderKernel extends EventEmitter {
      * @param {number} [spec.taskType]  2 for BT
      * @param {string} [spec.infoId]    infohash
      * @param {string} [spec.btTitle]
-     * @param {string} [spec.savePath]
+     * @param {string} [spec.dir]       save directory (this is the name the
+     *                                  engine reads; see the note below)
+     * @param {string} [spec.savePath]  the original's name for the same thing
      */
     addTask(spec) {
         const taskId = typeof this.engine.addTask === "function"
             ? this.engine.addTask(spec)
             : String(Date.now());
+        /*
+         * Both spellings of the save directory are recorded, and that is not
+         * redundancy.
+         *
+         * The engine reads `spec.dir` (engine-aria2.js). This record used to
+         * carry only `savePath`, which nothing downstream reads -- so a caller
+         * that set a directory through the kernel got the engine's default and
+         * no error anywhere. Keeping `dir` here is what makes the chosen
+         * directory visible on the task as well as honoured by the engine;
+         * `savePath` stays because it is the name the original's own task
+         * objects use.
+         */
         this.tasks.set(taskId, {
             taskId,
             url: spec.url,
             taskType: spec.taskType,
             infoId: spec.infoId,
             btTitle: spec.btTitle,
+            dir: spec.dir,
             savePath: spec.savePath,
+            out: spec.out,
             status: TASK_STATUS.QUEUED,
             bAcclerating: false,
             vipSpeed: 0,

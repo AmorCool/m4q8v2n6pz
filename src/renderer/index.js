@@ -675,9 +675,21 @@ function init() {
     document.getElementById("add").addEventListener("click", async () => {
         const url = input.value.trim();
         if (!url) return;
-        // The kernel decides whether this is a torrent, a magnet or a plain
-        // URL, so the renderer does not guess and does not send a type.
-        await call("CreateNewTask", { url });
+        /*
+         * The dialog is the real path now.
+         *
+         * It carries what this one-line input cannot: the save directory, a
+         * file name, and the torrent file list with per-file selection. The
+         * link the user already typed is handed over as a prefill so the paste
+         * is not thrown away.
+         *
+         * The inline create below is kept as the fallback rather than deleted.
+         * A build whose window cannot open -- or a call that fails -- still
+         * has to be able to start a download, and the one-line path is exactly
+         * that: no directory, no selection, but a task that runs.
+         */
+        const opened = await call("CreatePreNewTaskWindow", { prefill: { url } });
+        if (!opened) await call("CreateNewTask", { url });
         input.value = "";
         updateToolbar();
     });
