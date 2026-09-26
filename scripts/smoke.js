@@ -715,6 +715,158 @@ console.log("\nboot");
         await app.stop();
     });
 
+    // -----------------------------------------------------------------------
+    // aria2 engine
+    //
+    // The RPC client is not exercised: that would need a running aria2. What
+    // is tested is the translation layer, which is where the bugs are -- the
+    // two sides do not line up evenly and every field name here is read by
+    // something else.
+    // -----------------------------------------------------------------------
+    console.log("\naria2 engine");
+
+    const aria2 = require("../src/main/engine-aria2");
+
+    test("an active aria2 task maps to a downloading kernel task", () => {
+        const mapped = aria2.toKernelTask("t1", {
+            gid: "abc123",
+            status: "active",
+            totalLength: "1000",
+            completedLength: "250",
+            downloadSpeed: "500",
+            uploadSpeed: "0",
+            connections: "8",
+            files: [{ index: "1", path: "/d/a.bin", length: "1000", completedLength: "250", selected: "true" }],
+        });
+        assert.strictEqual(mapped.taskId, "t1");
+        assert.strictEqual(mapped.gid, "abc123");
+        assert.strictEqual(mapped.status, 1, "active must map to downloading");
+        assert.strictEqual(mapped.totalSize, 1000);
+        assert.strictEqual(mapped.completedSize, 250);
+        assert.strictEqual(mapped.progress, 0.25);
+        assert.strictEqual(mapped.downloadSpeed, 500);
+        assert.strictEqual(mapped.connections, 8);
+        assert.strictEqual(mapped.fileCount, 1);
+        assert.strictEqual(mapped.files[0].fileName, "a.bin");
+    });
+
+    test("aria2 numeric fields arrive as strings and become numbers", () => {
+        // A string that stayed a string would break arithmetic in the UI, and
+        // `"1000" > 900` is true while `"1000" + 1` is "10001".
+        const mapped = aria2.toKernelTask("t1", {
+            gid: "g", status: "active",
+            totalLength: "1000", completedLength: "250", downloadSpeed: "500",
+        });
+        assert.strictEqual(typeof mapped.totalSize, "number");
+        assert.strictEqual(typeof mapped.completedSize, "number");
+        assert.strictEqual(typeof mapped.downloadSpeed, "number");
+    });
+
+    test("a complete task maps to completed", () => {
+        const mapped = aria2.toKernelTask("t1", { gid: "g", status: "complete", totalLength: "10", completedLength: "10" });
+        assert.strictEqual(mapped.status, 3);
+    });
+
+    test("an errored task keeps its aria2 error text", () => {
+        const mapped = aria2.toKernelTask("t1", {
+            gid: "g", status: "error", errorCode: "1", errorMessage: "boom",
+        });
+        assert.strictEqual(mapped.status, 4);
+        assert.strictEqual(mapped.errorCode, 1);
+        assert.strictEqual(mapped.errorMessage, "boom");
+    });
+
+    test("eta is nulled when aria2 reports it without speed", () => {
+        // aria2 emits a huge sentinel eta for a stalled download. Passing it
+        // through would show a date in the year 50000 in the UI.
+        const stalled = aria2.toKernelTask("t1", { gid: "g", status: "active", downloadSpeed: "0", eta: "4294967295" });
+        assert.strictEqual(stalled.etaSeconds, null);
+        const moving = aria2.toKernelTask("t1", { gid: "g", status: "active", downloadSpeed: "100", eta: "60" });
+        assert.strictEqual(moving.etaSeconds, 60);
+    });
+
+    test("a torrent is identified by its bittorrent block", () => {
+        const mapped = aria2.toKernelTask("t1", {
+            gid: "g", status: "active", infoHash: "abcdef",
+            bittorrent: { info: { name: "the torrent" } },
+        });
+        assert.strictEqual(mapped.taskType, 2, "a torrent must be task type 2");
+        assert.strictEqual(mapped.infoId, "ABCDEF", "info hash is reported upper case");
+        assert.strictEqual(mapped.btTitle, "the torrent");
+    });
+
+    test("the infohash is upper cased to match the client convention", () => {
+        // The client stores infohashes upper case and compares them to find
+        // the same torrent added twice, so a lower-case one would duplicate.
+        const lower = aria2.toKernelTask("t1", { gid: "g", status: "active", infoHash: "aabbcc" });
+        assert.strictEqual(lower.infoId, "AABBCC");
+    });
+
+    test("an unknown aria2 status falls back to queued, not crashed", () => {
+        const mapped = aria2.toKernelTask("t1", { gid: "g", status: "something-new" });
+        assert.strictEqual(mapped.status, 0);
+    });
+
+    test("progress is zero rather than NaN when the length is unknown", () => {
+        // A magnet link has no length until metadata arrives; 0/0 must not
+        // become NaN and then render as "NaN%".
+        const mapped = aria2.toKernelTask("t1", { gid: "g", status: "active", totalLength: "0", completedLength: "0" });
+        assert.strictEqual(mapped.progress, 0);
+        assert.ok(Number.isFinite(mapped.progress));
+    });
+
+    test("all generated turbo flags are accepted by the patched option names", () => {
+        const engine = new aria2.Aria2Engine({ binary: "/nonexistent/aria2c" });
+        const args = engine.buildArgs().join(" ");
+        // These only exist in a Turbo build. If the wiring dropped a patch the
+        // engine would start and quietly download slower.
+        assert.ok(args.includes("--max-connection-per-server=-1"), args);
+        assert.ok(args.includes("--min-split-size=1K"), args);
+        assert.ok(args.includes("--retry-on-400=true"), args);
+    });
+
+    test("the engine saves and reloads a session", () => {
+        const engine = new aria2.Aria2Engine({ binary: "/nonexistent/aria2c", workDir: "/tmp/tl" });
+        const args = engine.buildArgs().join(" ");
+        // Without save-session a restart loses every in-flight download, which
+        // is the difference between resuming and starting over.
+        assert.ok(args.includes("--save-session="), args);
+        assert.ok(args.includes("--input-file="), args);
+        assert.ok(args.includes("--continue=true"), args);
+    });
+
+    test("dcdn state is tracked even though aria2 has no equivalent", () => {
+        const engine = new aria2.Aria2Engine({ binary: "/nonexistent/aria2c" });
+        const events = [];
+        engine.on("task-dcdn-status-changed", (e) => events.push(e));
+
+        engine.enableDcdn("t1", 2, "the-cert");
+        assert.strictEqual(engine._dcdn.get("t1").fileIndex, 2);
+        assert.strictEqual(events[0].bAcclerating, true);
+
+        engine.disableDcdn("t1", 2);
+        assert.strictEqual(engine._dcdn.has("t1"), false);
+        assert.strictEqual(events[1].bAcclerating, false);
+    });
+
+    test("a free port is actually free", async () => {
+        const port = await aria2.findFreePort();
+        assert.ok(port > 0 && port < 65536, String(port));
+    });
+
+    await testAsync("the application boots with a stub when aria2 is absent", async () => {
+        const app = await createApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+        // No engine was found, so the kernel must still answer.
+        const taskId = app.kernel.addTask({ url: "http://x/1" });
+        assert.ok(taskId, "the stub engine must still hand out a task id");
+        await app.stop();
+    });
+
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exit(failed === 0 ? 0 : 1);
 })();

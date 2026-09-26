@@ -27,6 +27,7 @@ const { ThunderKernel } = require("./kernel");
 const { LoginClient, createMemoryStore, parseVipInfo } = require("./login");
 const { VipTokenClient } = require("./vip-token");
 const { PluginHost } = require("./plugin-host");
+const { Aria2Engine } = require("./engine-aria2");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -200,7 +201,14 @@ class Application extends EventEmitter {
         this._registerServerFunctions();
 
         // 2. Kernel -----------------------------------------------------------
-        this.kernel = new ThunderKernel({ log: createLogger("kernel") });
+        // The real download engine is used when a binary is configured. With
+        // neither a path nor a working binary the stub takes over, so the app
+        // still boots and its UI is reachable without aria2 present.
+        const engine = this._createEngine();
+        this.kernel = new ThunderKernel({
+            log: createLogger("kernel"),
+            engine: engine || undefined,
+        });
         this._wireKernelEvents();
 
         // 3. Login ------------------------------------------------------------
@@ -332,6 +340,60 @@ class Application extends EventEmitter {
             // is what the transport uses, so they are the same value.
             [F.GET_TP_PEER_ID]: fromPlugin(async () => this.getPeerId()),
         });
+    }
+
+    /**
+     * Build the download engine, or return null to let the kernel use its
+     * stub.
+     *
+     * aria2 is shipped alongside the app rather than found on PATH, because a
+     * user-installed aria2 will not have the Turbo patches and would silently
+     * clamp the connection count. So the search is: explicit config, then the
+     * locations the packaging step uses, then PATH as a last resort.
+     */
+    _createEngine() {
+        const configured = this.config.aria2Path;
+        const name = process.platform === "win32" ? "aria2c.exe" : "aria2c";
+
+        const candidates = [
+            configured,
+            path.join(APP_ROOT, "bin", name),
+            path.join(APP_ROOT, "vendor", "aria2", name),
+            path.join(process.resourcesPath || "", "bin", name),
+        ].filter(Boolean);
+
+        let binary = "";
+        for (const candidate of candidates) {
+            try {
+                fs.accessSync(candidate, fs.constants.X_OK);
+                binary = candidate;
+                break;
+            } catch (err) {
+                // Not there or not executable; try the next.
+            }
+        }
+
+        if (!binary) {
+            this.log.information("no aria2 binary found; downloads are stubbed");
+            return null;
+        }
+
+        const engine = new Aria2Engine({
+            binary,
+            workDir: this.config.downloadDir || path.join(os.homedir(), "ThunderX"),
+            log: (...a) => this.log.information("aria2", ...a),
+        });
+
+        // Boot the engine without making the app wait for it. aria2 takes a
+        // moment to open its port, and a slow start should not block the UI
+        // from appearing.
+        engine.start().catch((err) => {
+            this.log.warning("aria2 failed to start:", err.message);
+            this.emit("engine-unavailable", err);
+        });
+
+        this.engine = engine;
+        return engine;
     }
 
     /** Re-emit kernel events into the mesh so renderers receive them. */

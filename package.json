@@ -7,7 +7,7 @@
     "scripts": {
         "start": "cross-env TL_OUTPUT=console node src/main/index.js",
         "test": "node scripts/smoke.js",
-        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/index.js"
+        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/engine-aria2.js && node --check src/main/index.js"
     },
     "engines": {
         "node": ">=18"
