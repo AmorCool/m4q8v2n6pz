@@ -4,3 +4,14 @@
 # 关键词 (模块名, 接口名, 协议细节, 排障记录), 仓库一旦公开就会被爬虫命中.
 # 文件本身留在本地磁盘上, 只是不跟着 git 走.
 *.md
+
+# 构建产物与依赖.
+#
+# dist/ 是 electron-builder 的输出 (安装包 + 解包目录), 里面带一份完整的
+# Electron 运行时, 单个安装包 80 MB 上下; node_modules/ 是 Electron 本体加
+# builder 的依赖树. 两者都能从源码重建, 不进仓库.
+#
+# bin/ 不在忽略之列: 引擎二进制本身由 scripts/fetch-engine.js 拉取, 但
+# 目录里那句说明要跟着走.
+dist/
+node_modules/

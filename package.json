@@ -3,6 +3,7 @@
     "version": "0.1.0",
     "description": "Thunder (Xunlei) desktop client rebuild",
     "private": true,
+    "author": "ThunderX Rebuild",
     "main": "src/main/electron-main.js",
     "scripts": {
         "start": "electron .",
@@ -40,14 +41,22 @@
                 "from": "bin",
                 "to": "bin",
                 "filter": [
-                    "**/*"
+                    "**/*",
+                    "!**/*.md"
                 ]
             }
         ],
         "win": {
+            "icon": "build/icon.ico",
             "target": [
                 {
                     "target": "nsis",
+                    "arch": [
+                        "x64"
+                    ]
+                },
+                {
+                    "target": "portable",
                     "arch": [
                         "x64"
                     ]
@@ -59,6 +68,9 @@
             "allowToChangeInstallationDirectory": true,
             "perMachine": false,
             "artifactName": "ThunderX-${version}-setup.${ext}"
+        },
+        "portable": {
+            "artifactName": "ThunderX-${version}-portable.${ext}"
         }
     },
     "keywords": [

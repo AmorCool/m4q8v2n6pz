@@ -243,6 +243,25 @@ function main() {
         return;
     }
 
+    /*
+     * Stop before the network when the binary is already in place.
+     *
+     * `npm run dist` chains this script in front of electron-builder, so a
+     * packaging run on a host that already has bin/aria2c.exe was going out to
+     * GitHub for a token it did not need -- and failing there, because the
+     * build repository is private and a packaging host usually has no
+     * credentials for it. The fetch is what needs a token, not the build.
+     *
+     * This is a short-circuit and not a fallback: with no binary on disk the
+     * script still fails loudly below, so a fresh checkout cannot quietly
+     * produce an installer whose engine is a stub.
+     */
+    const installed = path.join(BIN_DIR, wanted.name);
+    if (fs.existsSync(installed) && fs.statSync(installed).size > 0) {
+        console.log(`already present: ${installed} (${fs.statSync(installed).size} bytes)`);
+        return;
+    }
+
     console.log(`looking for a ${target} build in ${REPO}`);
     const token = findToken();
     const releases = releaseAssets(token);
