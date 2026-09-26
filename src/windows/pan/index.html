@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>云盘</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!--
+        The cloud-drive browser.
+
+        Rows top to bottom: a toolbar, a breadcrumb bar, the column header,
+        the elastic file list, and a status line. The original draws this as
+        the ThunderPanPlugin page (pages/index.205c532.js) with the same three
+        regions -- a path bar, a list, and a right-click menu whose first item
+        is "下载" (list@154960). The menu is not reproduced: this window gives
+        every file its own download button instead, because a window with no
+        context menu has nowhere to hide the only action that matters here.
+    -->
+    <header class="toolbar">
+        <button id="refresh" class="mini" type="button" title="刷新">刷新</button>
+        <nav id="crumbs" class="crumbs" aria-label="路径"></nav>
+        <span id="count" class="count"></span>
+    </header>
+
+    <div class="head">
+        <span class="col-name">名称</span>
+        <span class="col-size">大小</span>
+        <span class="col-time">修改时间</span>
+        <span class="col-action"></span>
+    </div>
+
+    <main id="files" class="files"></main>
+
+    <div id="loading" class="loading">
+        <div class="indeterminate"><i></i></div>
+        <p id="loading-text">正在读取云盘…</p>
+    </div>
+
+    <p id="error" class="error is-hidden"></p>
+    <p id="notice" class="notice is-hidden"></p>
+
+    <footer class="status">
+        <span id="status-text">我的云盘</span>
+    </footer>
+
+    <script src="index.js"></script>
+</body>
+</html>

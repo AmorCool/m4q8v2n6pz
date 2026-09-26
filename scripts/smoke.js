@@ -481,6 +481,296 @@ test("build number is the last dotted component", () => {
     assert.strictEqual(buildNumberOf(""), "");
 });
 
+// ---------------------------------------------------------------------------
+// Cloud drive (pan)
+//
+// The drive's calls cannot be run end to end without a real account, so what
+// is checked is the part that can be: the request the client would send, the
+// parse of a response it might get back, and the classification of the two
+// 401s. The samples are hand-written from the field names in
+// PAN_DIRECT_LINK_SPEC.md section 2.1; they are not recordings.
+// ---------------------------------------------------------------------------
+console.log("\npan (cloud drive)");
+
+const pan = require("../src/main/pan");
+
+/** An identity as `Application.panSession` builds it. */
+function panIdentity(extra) {
+    return Object.assign(
+        {
+            peerId: "PEER",
+            tpPeerId: "TPPEER",
+            deviceId: "DEV",
+            numericVersion: "2662",
+            cookie: "a=b",
+            baseUrl: pan.PAN_ENDPOINTS.drive.prod,
+            tryBaseUrl: pan.TRY_ENDPOINTS.prod,
+        },
+        extra || {}
+    );
+}
+
+/** A request stub that records what it was asked to send. */
+function panStub(handler) {
+    const seen = [];
+    return {
+        seen,
+        request: async (url, opts) => {
+            seen.push({ url, opts });
+            return handler(url, opts, seen.length);
+        },
+    };
+}
+
+test("the three identity headers are always present", () => {
+    const headers = pan.buildPanHeaders(panIdentity());
+    assert.strictEqual(headers["x-peer-id"], "PEER");
+    assert.strictEqual(headers["x-client-version-code"], "2662");
+    assert.strictEqual(headers["x-device-id"], "DEV");
+});
+
+test("the file-info call switches to the drive peer id", () => {
+    // app.js@58503: x-peer-id is the tp peer id when opts.useTpPeerId is set,
+    // and the file-info call is the one that sets it.
+    const headers = pan.buildPanHeaders(panIdentity({ useTpPeerId: true }));
+    assert.strictEqual(headers["x-peer-id"], "TPPEER");
+});
+
+test("the captcha token is added only when there is one", () => {
+    assert.ok(!("x-captcha-token" in pan.buildPanHeaders(panIdentity())));
+    const headers = pan.buildPanHeaders(panIdentity({ captchaToken: "CT" }));
+    assert.strictEqual(headers["x-captcha-token"], "CT");
+});
+
+test("listing points at the prod drive host and carries the fixed filters", () => {
+    const req = pan.buildListFilesRequest(panIdentity(), { parentId: "root", limit: 50 });
+    assert.strictEqual(req.method, "GET");
+    assert.ok(req.url.startsWith("https://api-pan.xunlei.com/drive/v1/files?"), req.url);
+    assert.ok(req.url.includes("parent_id=root"), req.url);
+    assert.ok(req.url.includes("limit=50"), req.url);
+    assert.ok(req.url.includes("with_audit=true"), req.url);
+    const filters = decodeURIComponent(req.url.split("filters=")[1].split("&")[0]);
+    assert.ok(filters.includes("PHASE_TYPE_COMPLETE"), filters);
+    assert.ok(filters.includes('"trashed":{"eq":false}'), filters);
+});
+
+test("the file-info URL is the file id and carries the try token", () => {
+    const req = pan.buildFileInfoRequest(panIdentity(), "FILE 1", { tryToken: "TT" });
+    assert.ok(req.url.startsWith("https://api-pan.xunlei.com/drive/v1/files/FILE%201"), req.url);
+    assert.ok(req.url.includes("try_token=TT"), req.url);
+    assert.strictEqual(req.headers["x-peer-id"], "TPPEER");
+});
+
+test("a share link uses share/file_info with the three fields", () => {
+    const req = pan.buildShareFileInfoRequest(panIdentity(), {
+        fileId: "F", shareId: "S", passCodeToken: "P",
+    });
+    assert.ok(req.url.includes("share/file_info?"), req.url);
+    assert.ok(req.url.includes("file_id=F"), req.url);
+    assert.ok(req.url.includes("share_id=S"), req.url);
+    assert.ok(req.url.includes("pass_code_token=P"), req.url);
+});
+
+test("the trial request posts to the try host with the super scene", () => {
+    const req = pan.buildTryRequest(panIdentity(), "query", {
+        fileId: "F", gcid: "G", fileName: "n.bin", mimeType: "text/plain", isSuperMember: true,
+    });
+    assert.strictEqual(req.method, "POST");
+    assert.strictEqual(req.url, "https://try-pan-privilege-vip.xunlei.com/try/v1/query");
+    assert.strictEqual(req.body.res_type, "PAN_RES");
+    assert.strictEqual(req.body.client, "PC");
+    assert.strictEqual(req.body.try_scene, "PAN_PACK_DOWNLOAD_SUPER");
+    assert.strictEqual(req.body.res_desc.file_name, "n.bin");
+});
+
+test("a non-super member gets the platinum scene", () => {
+    const req = pan.buildTryRequest(panIdentity(), "commit", { fileId: "F", isSuperMember: false });
+    assert.strictEqual(req.body.try_scene, "PAN_PACK_DOWNLOAD_BAIJIN");
+});
+
+test("a listing marks folders and converts sizes to numbers", () => {
+    const page = pan.parseFileList({
+        files: [
+            { id: "1", name: "folder", kind: "drive#folder", size: "0" },
+            { id: "2", name: "f.bin", kind: "drive#file", size: "1024", web_content_link: "u" },
+        ],
+        next_page_token: "NP",
+    });
+    assert.strictEqual(page.files.length, 2);
+    assert.strictEqual(page.files[0].isFolder, true);
+    assert.strictEqual(page.files[1].isFolder, false);
+    assert.strictEqual(typeof page.files[1].size, "number");
+    assert.strictEqual(page.files[1].size, 1024);
+    assert.strictEqual(page.nextPageToken, "NP");
+});
+
+test("the direct link takes expire and token from the first links key", () => {
+    // app.js@204960: the key inside `links` is not fixed, so the first one is
+    // used (spec section 9.1).
+    const link = pan.parseDirectLink({
+        web_content_link: "http://cdn/x",
+        links: { cdn_1: { expire: "2026-01-01T00:00:00Z", token: "tok" } },
+        name: "a.bin",
+        size: "10",
+    });
+    assert.strictEqual(link.url, "http://cdn/x");
+    assert.strictEqual(link.expire, "2026-01-01T00:00:00Z");
+    assert.strictEqual(link.token, "tok");
+    assert.strictEqual(link.size, 10);
+});
+
+test("the share wrapper parses the same way", () => {
+    const link = pan.parseDirectLink({
+        file_info: { web_content_link: "http://s/x", links: { k: { expire: "e", token: "t" } } },
+    });
+    assert.strictEqual(link.url, "http://s/x");
+    assert.strictEqual(link.token, "t");
+});
+
+test("a 401 with no session is not-logged-in, with one it is expired", () => {
+    assert.strictEqual(pan.classifyPanError(401, {}, false), pan.PAN_ERROR.NOT_LOGGED_IN);
+    assert.strictEqual(pan.classifyPanError(401, {}, true), pan.PAN_ERROR.SESSION_EXPIRED);
+});
+
+test("a risk-control 403 is reported as needing a captcha", () => {
+    assert.strictEqual(
+        pan.classifyPanError(403, { error_description: "captcha/init required" }, true),
+        pan.PAN_ERROR.CAPTCHA_REQUIRED
+    );
+    assert.strictEqual(pan.classifyPanError(403, { error_description: "no permission" }, true), pan.PAN_ERROR.FORBIDDEN);
+});
+
+test("a 404 is a missing file", () => {
+    assert.strictEqual(pan.classifyPanError(404, {}, true), pan.PAN_ERROR.NOT_FOUND);
+});
+
+await testAsync("a signed-out client refuses before it sends anything", async () => {
+    const stub = panStub(() => ({ status: 401, data: {} }));
+    const client = new pan.PanClient({ getSession: () => ({}), request: stub.request });
+    let err = null;
+    try {
+        await client.listFiles();
+    } catch (error) {
+        err = error;
+    }
+    assert.ok(err, "the call must reject");
+    assert.strictEqual(err.code, pan.PAN_ERROR.NOT_LOGGED_IN);
+    assert.strictEqual(stub.seen.length, 0, "no request must be sent without a session");
+});
+
+await testAsync("a 401 with a session reads as an expired session", async () => {
+    const stub = panStub(() => ({ status: 401, data: { error_description: "unauthorized" } }));
+    const client = new pan.PanClient({
+        getSession: () => ({ sessionId: "S", peerId: "p", deviceId: "d", numericVersion: "2662" }),
+        request: stub.request,
+    });
+    let err = null;
+    try {
+        await client.listFiles();
+    } catch (error) {
+        err = error;
+    }
+    assert.ok(err);
+    assert.strictEqual(err.code, pan.PAN_ERROR.SESSION_EXPIRED);
+    assert.strictEqual(stub.seen.length, 1, "the request must have been attempted");
+});
+
+await testAsync("resolving a self file runs the trial pair then file-info", async () => {
+    const stub = panStub((url) => {
+        if (url.includes("/try/v1/query")) return { status: 200, data: { status: "OK", left_times: 1 } };
+        if (url.includes("/try/v1/commit")) return { status: 200, data: { status: "OK", try_token: "TT" } };
+        if (url.includes("/files/F1")) {
+            return {
+                status: 200,
+                data: {
+                    web_content_link: "http://cdn/x",
+                    links: { cdn: { expire: "2026-01-01T00:00:00Z", token: "tok" } },
+                    name: "a.bin",
+                    size: "10",
+                },
+            };
+        }
+        return { status: 404, data: {} };
+    });
+    const client = new pan.PanClient({
+        getSession: () => ({ sessionId: "S", peerId: "p", deviceId: "d", numericVersion: "2662" }),
+        request: stub.request,
+    });
+
+    const link = await client.resolveDirectLink({ fileId: "F1" });
+    assert.strictEqual(link.url, "http://cdn/x");
+    assert.strictEqual(link.token, "tok");
+    assert.strictEqual(link.viaShare, false);
+
+    // The trial token it just received has to reach the file-info call, or the
+    // trial was claimed and thrown away.
+    const info = stub.seen.find((c) => c.url.includes("/files/F1"));
+    assert.ok(info, "file-info must have been called");
+    assert.ok(info.url.includes("try_token=TT"), info.url);
+});
+
+await testAsync("a failed trial does not stop the link from being issued", async () => {
+    const stub = panStub((url) => {
+        if (url.includes("/try/v1/")) return { status: 403, data: { error_description: "no trial left" } };
+        if (url.includes("/files/F2")) {
+            return { status: 200, data: { web_content_link: "http://cdn/y", links: {} } };
+        }
+        return { status: 404, data: {} };
+    });
+    const client = new pan.PanClient({
+        getSession: () => ({ sessionId: "S" }),
+        request: stub.request,
+    });
+    const link = await client.resolveDirectLink({ fileId: "F2" });
+    assert.strictEqual(link.url, "http://cdn/y");
+    const info = stub.seen.find((c) => c.url.includes("/files/F2"));
+    assert.ok(!info.url.includes("try_token="), info.url);
+});
+
+await testAsync("a shared file resolves through share/file_info", async () => {
+    const stub = panStub((url) => {
+        if (url.includes("share/file_info")) {
+            return { status: 200, data: { file_info: { web_content_link: "http://s/x", links: { k: { expire: "e", token: "t" } } } } };
+        }
+        return { status: 404, data: {} };
+    });
+    const client = new pan.PanClient({ getSession: () => ({ sessionId: "S" }), request: stub.request });
+    const link = await client.resolveDirectLink({ fileId: "F", shareId: "SH", passCodeToken: "PC" });
+    assert.strictEqual(link.url, "http://s/x");
+    assert.strictEqual(link.viaShare, true);
+    assert.strictEqual(stub.seen.length, 1, "a share needs exactly one call");
+});
+
+await testAsync("a response with no link is a distinct error", async () => {
+    const client = new pan.PanClient({
+        getSession: () => ({ sessionId: "S" }),
+        request: async () => ({ status: 200, data: {} }),
+    });
+    let err = null;
+    try {
+        await client.resolveDirectLink({ fileId: "F", useTry: false });
+    } catch (error) {
+        err = error;
+    }
+    assert.ok(err);
+    assert.strictEqual(err.code, pan.PAN_ERROR.NO_DIRECT_LINK);
+});
+
+await testAsync("a network failure is reported as such, not as a 401", async () => {
+    const client = new pan.PanClient({
+        getSession: () => ({ sessionId: "S" }),
+        request: async () => { throw new Error("ECONNREFUSED"); },
+    });
+    let err = null;
+    try {
+        await client.listFiles();
+    } catch (error) {
+        err = error;
+    }
+    assert.ok(err);
+    assert.strictEqual(err.code, pan.PAN_ERROR.NETWORK);
+});
+
 console.log("\nboot");
 
 /*
@@ -1235,6 +1525,52 @@ async function engineReady(engine, deadlineMs) {
         await app.stop();
     });
 
+    /*
+     * The cloud drive over the transport.
+     *
+     * This is the whole client-side path a signed-out install can walk: the
+     * drive answers "not logged in" rather than an empty list, the take-back
+     * queue round-trips through the two original names, and draining it
+     * reports each file as failed instead of pretending a download started.
+     * The happy path needs a real account and is not reachable here.
+     */
+    await testAsync("the cloud drive answers through the transport", async () => {
+        const app = await testApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+        const context = { id: "renderer" };
+        const call = (name, ...args) =>
+            app.mesh.main.callServerFunction(name, context, context, ...args);
+
+        const listed = await call("PanListFiles", { parentId: "" });
+        assert.strictEqual(listed.ok, false, "a signed-out listing must not look empty");
+        assert.strictEqual(listed.code, "not_logged_in");
+
+        const queued = await call("ExternalFetchBack", {
+            files: [{ id: "F1", name: "a.bin", size: 10 }],
+        });
+        assert.strictEqual(queued.count, 1);
+
+        const pending = await call("GetFetchBackFiles");
+        assert.strictEqual(pending.length, 1);
+        assert.strictEqual(pending[0].fileId, "F1");
+
+        const started = await call("IpcStartRetrieval", "/tmp/somewhere");
+        assert.strictEqual(started.added, 0);
+        assert.strictEqual(started.failed, 1);
+        assert.strictEqual(started.results[0].code, "not_logged_in");
+
+        assert.strictEqual((await call("GetFetchBackFiles")).length, 0, "the queue must be drained");
+
+        const folder = await call("IpcSetRecentFolder", "/tmp/somewhere");
+        assert.strictEqual(folder.dir, "/tmp/somewhere");
+
+        await app.stop();
+    });
+
     await testAsync("an unregistered method resolves to nothing rather than throwing", async () => {
         const app = await testApplication({
             config: {
@@ -1267,6 +1603,147 @@ async function engineReady(engine, deadlineMs) {
         );
 
         await app.stop();
+    });
+
+    /*
+     * The cloud-drive page, driven against a DOM stub.
+     *
+     * Electron cannot start in this environment -- `electron <script>` exits
+     * without a window -- so the page is loaded into a `vm` context with a
+     * small DOM: enough for the renderer to build rows and for the test to
+     * click them. What it proves is the wiring (the root listing is requested
+     * on load, a folder name navigates, a file's button asks for the link),
+     * not that the pixels are right. A real look at the window needs a
+     * desktop session.
+     */
+    await testAsync("the cloud-drive page lists, navigates and downloads", async () => {
+        const vm = require("vm");
+        const source = fs.readFileSync(
+            path.join(__dirname, "..", "src", "windows", "pan", "index.js"),
+            "utf8"
+        );
+
+        // --- a DOM small enough for this page and no smaller ---------------
+        const makeElement = (tag) => {
+            const el = {
+                tagName: String(tag || "div").toUpperCase(),
+                children: [],
+                _text: "",
+                className: "",
+                title: "",
+                type: "",
+                disabled: false,
+                value: "",
+                dataset: {},
+                style: {},
+                _listeners: {},
+                appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+                append(...kids) { for (const kid of kids) this.appendChild(kid); },
+                setAttribute(key, value) { this[key] = value; },
+                addEventListener(name, fn) { (this._listeners[name] = this._listeners[name] || []).push(fn); },
+                removeEventListener() {},
+                click() { (this._listeners.click || []).forEach((fn) => fn({ target: this })); },
+                getBoundingClientRect() { return { width: 0, height: 0 }; },
+            };
+            Object.defineProperty(el, "textContent", {
+                get() {
+                    return this.children.length
+                        ? this.children.map((child) => child.textContent).join("")
+                        : this._text;
+                },
+                set(value) { this._text = String(value); this.children.length = 0; },
+            });
+            const classes = new Set();
+            el.classList = {
+                add: (...names) => names.forEach((name) => classes.add(name)),
+                remove: (...names) => names.forEach((name) => classes.delete(name)),
+                toggle: (name, force) => {
+                    const on = force === undefined ? !classes.has(name) : !!force;
+                    if (on) classes.add(name); else classes.delete(name);
+                    return on;
+                },
+                contains: (name) => classes.has(name),
+            };
+            return el;
+        };
+
+        const ids = [
+            "refresh", "crumbs", "count", "files", "loading",
+            "loading-text", "error", "notice", "status-text",
+        ];
+        const byId = {};
+        for (const id of ids) byId[id] = makeElement(id === "refresh" ? "button" : "div");
+        const documentStub = { getElementById: (id) => byId[id] || null, createElement: makeElement };
+
+        // --- the page's calls ----------------------------------------------
+        const calls = [];
+        const rpc = async (method, ...args) => {
+            calls.push({ method, args });
+            if (method === "PanListFiles") {
+                const parentId = (args[0] && args[0].parentId) || "";
+                if (parentId === "") {
+                    return {
+                        ok: true,
+                        value: {
+                            ok: true,
+                            files: [
+                                { id: "folder-1", name: "电影", kind: "drive#folder", isFolder: true, size: 0 },
+                                { id: "file-1", name: "a.bin", kind: "drive#file", size: 1024, modifiedTime: "2026-01-02T03:04:05Z" },
+                            ],
+                        },
+                    };
+                }
+                return {
+                    ok: true,
+                    value: { ok: true, files: [{ id: "file-2", name: "inside.bin", kind: "drive#file", size: 10 }] },
+                };
+            }
+            if (method === "PanDownloadFile") {
+                return { ok: true, value: { ok: true, name: "a.bin", taskId: "t1" } };
+            }
+            return { ok: true, value: null };
+        };
+
+        const sandbox = { document: documentStub, console, setTimeout, clearTimeout };
+        sandbox.window = sandbox;
+        sandbox.thunderx = { rpc };
+        vm.createContext(sandbox);
+        vm.runInContext(source, sandbox, { filename: "pan/index.js" });
+
+        // load() is async; give it a tick to settle.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.ok(calls.length >= 1, "the page must ask for something on load");
+        assert.strictEqual(calls[0].method, "PanListFiles");
+        assert.strictEqual(calls[0].args[0].parentId, "", "the first call must be the root folder");
+
+        const rows = byId["files"].children;
+        assert.strictEqual(rows.length, 2, "two rows: one folder, one file");
+
+        // The folder's name is a button; clicking it navigates into the folder.
+        const folderName = rows[0].children[0];
+        assert.ok(folderName.className.includes("is-folder"), folderName.className);
+        folderName.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const navCall = calls[calls.length - 1];
+        assert.strictEqual(navCall.method, "PanListFiles");
+        assert.strictEqual(navCall.args[0].parentId, "folder-1", "the folder id must be the new parent");
+        assert.strictEqual(byId["files"].children.length, 1, "the folder's own listing must be drawn");
+
+        // Back to the root through the breadcrumb, then press the file button.
+        byId["crumbs"].children[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.strictEqual(calls[calls.length - 1].args[0].parentId, "", "the root crumb must go back");
+
+        const download = byId["files"].children[1].children[3].children[0];
+        assert.strictEqual(download.className, "download");
+        download.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const downloadCall = calls.find((call) => call.method === "PanDownloadFile");
+        assert.ok(downloadCall, "the download button must call PanDownloadFile");
+        assert.strictEqual(downloadCall.args[0].fileId, "file-1");
+        assert.ok(byId["notice"].textContent.includes("a.bin"), byId["notice"].textContent);
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);

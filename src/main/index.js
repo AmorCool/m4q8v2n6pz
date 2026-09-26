@@ -25,6 +25,7 @@ const contract = require("./contract");
 const { createMesh } = require("./rpc");
 const { ThunderKernel } = require("./kernel");
 const { LoginClient, createMemoryStore, parseVipInfo } = require("./login");
+const { PanClient, PAN_ERROR } = require("./pan");
 const { VipTokenClient } = require("./vip-token");
 const { PluginHost } = require("./plugin-host");
 const { Aria2Engine } = require("./engine-aria2");
@@ -210,12 +211,23 @@ class Application extends EventEmitter {
         this.mesh = null;
         this.kernel = null;
         this.login = null;
+        this.pan = null;
         this.vipToken = null;
         this.pluginHost = null;
 
         this.plugins = new Map();
         // Views a plugin asked for before a renderer existed to mount them.
         this.pendingWebviews = [];
+        /*
+         * The files a "take back to local" request is holding.
+         *
+         * The original keeps this on the drive store (`state.drive.toFetchBackList`)
+         * and reads it back from the take-back popup through
+         * `GetFetchBackFiles` (app.js@2118077). This build has no separate
+         * popup, but the names are the contract's, so the list lives here and
+         * the two server functions read and drain it.
+         */
+        this.fetchBackList = [];
         /*
          * The save directory the user last committed a task to.
          *
@@ -269,14 +281,24 @@ class Application extends EventEmitter {
         this.login.initDeviceIdentity();
         this.log.information("device sign computed");
 
-        // 4. VIP token client -------------------------------------------------
+        // 4. Cloud-drive client ------------------------------------------------
+        // Built after login because it reads its identity from it, and kept in
+        // the main process because that is where the session material lives.
+        // The drive's own calls are made from here rather than from the page,
+        // so a renderer never has to be handed a cookie.
+        this.pan = new PanClient({
+            getSession: () => this.panSession(),
+            log: (...a) => this.log.information("pan", ...a),
+        });
+
+        // 5. VIP token client -------------------------------------------------
         this.vipToken = new VipTokenClient({
             callServerFunction: (name, ...args) =>
                 this.mesh.main.callServerFunction(name, ...args),
             getBuildNo: () => buildNumberOf(this.config.clientVersion),
         });
 
-        // 5. Plugin host ------------------------------------------------------
+        // 6. Plugin host ------------------------------------------------------
         // Built before plugins load so that a plugin's registration calls have
         // somewhere to land, but nothing is loaded yet: plugins expect a fully
         // wired context and the session may still be restoring.
@@ -285,10 +307,10 @@ class Application extends EventEmitter {
             log: (...a) => this.log.information(...a),
         });
 
-        // 6. Restore the previous session -------------------------------------
+        // 7. Restore the previous session -------------------------------------
         await this._restoreSession();
 
-        // 7. Anonymous fallback -----------------------------------------------
+        // 8. Anonymous fallback -----------------------------------------------
         // Delayed so it does not race a real login that is about to complete.
         this._anonymousTimer = setTimeout(() => {
             this.login.signUpAnonymously().catch((err) => {
@@ -437,6 +459,31 @@ class Application extends EventEmitter {
             [F.PRE_DOWNLOADING]: fromPlugin(async () => this.isPreDownloading()),
             [F.CREATE_NEW_TASK_EX]: fromPlugin(async (spec, indices) =>
                 this.createTaskEx(spec, indices)),
+
+            /*
+             * Cloud drive.
+             *
+             * The first two are the window's calls: list a folder, and take
+             * one file back to local. Both return a plain result object rather
+             * than throwing, because the drive's 401 has two meanings
+             * (`not_logged_in` and `session_expired`) and a thrown error loses
+             * the code on the way through the transport. The window branches
+             * on `ok` and reads `code` for the wording.
+             *
+             * The rest are the original's own names (contract section "pan").
+             * `ExternalFetchBack` is the web/clipboard entry point: it queues
+             * the files and opens the browser; `GetFetchBackFiles` hands the
+             * queue to whoever asks; `IpcStartRetrieval` drains it into real
+             * downloads. `IpcSetRecentFolder` records the save directory.
+             */
+            [F.PAN_LIST_FILES]: fromPlugin(async (options) => this.panListFiles(options)),
+            [F.PAN_DOWNLOAD_FILE]: fromPlugin(async (spec) => this.panDownloadFile(spec)),
+            [F.GET_FETCH_BACK_FILES]: fromPlugin(async () => this.fetchBackList.slice()),
+            [F.IPC_START_RETRIEVAL]: fromPlugin(async (dir) => this.startRetrieval(dir)),
+            [F.EXTERNAL_FETCH_BACK]: fromPlugin(async (data) => this.externalFetchBack(data)),
+            [F.EXTERNAL_FETCH_BACK_BY_ID]: fromPlugin(async (fileId) =>
+                this.panDownloadFile({ fileId })),
+            [F.IPC_SET_RECENT_FOLDER]: fromPlugin(async (dir) => this.setRecentFolder(dir)),
         });
     }
 
@@ -1057,6 +1104,178 @@ class Application extends EventEmitter {
             if (wantsStart) this.kernel.startTask(taskId);
         }
         return taskId;
+    }
+
+    // -----------------------------------------------------------------------
+    // Cloud drive
+    // -----------------------------------------------------------------------
+
+    /**
+     * The identity the drive client authenticates with.
+     *
+     * Read fresh on every call rather than captured once, because the drive
+     * client is built at boot and the session arrives later. `deviceId` is the
+     * device signature, which is the value the original's own
+     * `GetDeviceIdOfWebSDKPlugin` hands the plugin; `numericVersion` is the
+     * bare build number the header wants (`12.1.2.2662` -> `2662`).
+     *
+     * The cookie is the honest gap: the drive authenticates with the session
+     * cookie, and this build's login calls go out over raw https without a
+     * cookie jar, so nothing ever writes one. The store is read anyway so that
+     * a cookie-capturing login can drop the value in one place and have the
+     * drive pick it up -- and an empty cookie is what makes the 401 classify
+     * as "not logged in" rather than as a mystery failure.
+     */
+    panSession() {
+        const peerId = this.getPeerId();
+        return {
+            userId: this.login.userId || "",
+            sessionId: this.login.sessionId || "",
+            peerId,
+            tpPeerId: peerId,
+            deviceId: this.login.deviceSign || "",
+            numericVersion: buildNumberOf(this.config.clientVersion),
+            cookie: this.store.get("pan-cookie") || "",
+        };
+    }
+
+    /** A failed drive call as the plain result object the window reads. */
+    _panFailure(err) {
+        return {
+            ok: false,
+            code: (err && err.code) || PAN_ERROR.NETWORK,
+            message: (err && err.message) || "云盘请求失败",
+        };
+    }
+
+    /**
+     * List one folder of the drive.
+     *
+     * Returns `{ ok, files, nextPageToken }` or `{ ok: false, code, message }`.
+     * The window draws one page and follows the token itself, which is why the
+     * token is surfaced rather than looped over here.
+     */
+    async panListFiles(options) {
+        const o = options || {};
+        try {
+            const page = await this.pan.listFiles({
+                parentId: o.parentId || "",
+                pageToken: o.pageToken || "",
+                limit: o.limit || 100,
+            });
+            return { ok: true, files: page.files, nextPageToken: page.nextPageToken };
+        } catch (err) {
+            return this._panFailure(err);
+        }
+    }
+
+    /**
+     * Take one drive file back to local.
+     *
+     * This is the client half of the original's
+     * `addOrRefreshServerAndToken` (app.js@204300): resolve the direct link,
+     * then hand it to the kernel. The original creates a P2sp task with an
+     * empty URL and back-fills it with `SetTaskUrl`; aria2 has no such split,
+     * so the link goes in at creation.
+     *
+     * The result carries the link's `expire` and `token` even though the
+     * engine ignores them today. They are what a link refresh would need (the
+     * original re-fetches 300 seconds before `expire`, app.js@201577), and
+     * dropping them here would leave a long download unrefreshable with
+     * nothing to point at.
+     *
+     * @returns {Promise<object>} `{ ok, taskId, name, url, expire, token }`
+     */
+    async panDownloadFile(spec) {
+        const s = spec || {};
+        if (!s.fileId) {
+            return { ok: false, code: PAN_ERROR.NOT_FOUND, message: "缺少 fileId" };
+        }
+
+        let link;
+        try {
+            link = await this.pan.resolveDirectLink({
+                fileId: s.fileId,
+                shareId: s.shareId || "",
+                passCodeToken: s.passCodeToken || "",
+                gcid: s.hash || "",
+                fileName: s.name || "",
+                mimeType: s.mimeType || "",
+                isSuperMember:
+                    !!(this.login.vipInfo && this.login.vipInfo.vipType === "super"),
+            });
+        } catch (err) {
+            return this._panFailure(err);
+        }
+
+        // The drive's own name wins: it is the real file name, and a caller's
+        // copy may be a display label. Path separators are stripped so a name
+        // cannot point the engine outside the save directory.
+        const name = String(link.name || s.name || "").replace(/[\\/]+/g, "_");
+        const taskId = this.kernel.addTask({
+            url: link.url,
+            dir: s.dir || this.lastDownloadDir || undefined,
+            out: name || undefined,
+        });
+
+        return { ok: true, taskId, name, url: link.url, expire: link.expire, token: link.token };
+    }
+
+    /**
+     * Queue files for take-back (the original's `drive/fetchBackFiles`).
+     *
+     * The original pops a window here to pick a save directory. This build has
+     * no such popup, so the files are queued and the browser window is asked
+     * to open; the actual download happens in `startRetrieval`.
+     */
+    externalFetchBack(data) {
+        const d = data || {};
+        const files = Array.isArray(d.files) ? d.files : [];
+        const shared = {
+            shareId: d.shareId || "",
+            passCodeToken: d.passCodeToken || "",
+            userId: d.userId || "",
+            shareUserId: d.shareUserId || "",
+            from: d.from || "",
+        };
+        for (const file of files) {
+            this.fetchBackList.push(
+                Object.assign({}, shared, {
+                    fileId: file.id || file.fileId || "",
+                    name: file.name || "",
+                    size: Number(file.size || 0),
+                    hash: file.hash || file.gcid || "",
+                    mimeType: file.mime_type || file.mimeType || "",
+                })
+            );
+        }
+        // The window is a main-process concern; the application only asks for
+        // it. A listener in electron-main answers; with no listener the queue
+        // still fills and `GetFetchBackFiles` still returns it.
+        this.emit("open-pan-window");
+        return { ok: true, count: this.fetchBackList.length };
+    }
+
+    /**
+     * Drain the queue into real downloads (the original's
+     * `retrieval-list/startRetrieval`). `dir` is the chosen save directory.
+     */
+    async startRetrieval(dir) {
+        const files = this.fetchBackList.slice();
+        this.fetchBackList = [];
+
+        const results = [];
+        for (const file of files) {
+            results.push(await this.panDownloadFile(Object.assign({}, file, { dir })));
+        }
+        const added = results.filter((r) => r.ok).length;
+        return { ok: added === results.length, added, failed: results.length - added, results };
+    }
+
+    /** Remember the last save directory the drive window used. */
+    setRecentFolder(dir) {
+        if (dir) this.lastDownloadDir = String(dir);
+        return { ok: true, dir: this.lastDownloadDir };
     }
 
     async stop() {

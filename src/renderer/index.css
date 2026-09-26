@@ -432,6 +432,31 @@ body {
     color: var(--accent);
 }
 
+/*
+ * The cloud-drive entry.
+ *
+ * Deliberately not a `.filter`: the filter buttons are wired to the status
+ * filter by class in `init()`, and a button that looks like one but does not
+ * filter would be a trap. Same shape, different job -- it opens a window.
+ */
+.sidebar-action {
+    text-align: left;
+    padding: 7px 10px;
+    margin-bottom: 6px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 5px 5px 0 0;
+    background: transparent;
+    color: var(--text-dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+.sidebar-action:hover {
+    background: var(--panel-2);
+    color: var(--accent);
+}
+
 /* Content ------------------------------------------------------------------ */
 
 #content {

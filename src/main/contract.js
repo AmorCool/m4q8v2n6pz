@@ -207,6 +207,30 @@ const SERVER_FUNCTIONS = Object.freeze({
     // because the two dialogs differ only by their filter.
     PICK_DIRECTORY: "PickDirectory",
 
+    // --- pan / cloud drive ----------------------------------------------------
+    //
+    // The first five are the original's own names, read off the recovered
+    // ThunderPanPlugin (PAN_DIRECT_LINK_SPEC.md section 6): the plugin page
+    // dispatches `drive/fetchBackFiles` to open the take-back popup, the popup
+    // calls `IpcStartRetrieval`, and the two `ExternalFetchBack` entries are
+    // the web/clipboard entry points. They are kept verbatim so a plugin that
+    // still calls them lands on the same handlers.
+    GET_FETCH_BACK_FILES: "GetFetchBackFiles",
+    IPC_START_RETRIEVAL: "IpcStartRetrieval",
+    EXTERNAL_FETCH_BACK: "ExternalFetchBack",
+    EXTERNAL_FETCH_BACK_BY_ID: "ExternalFetchBackById",
+    IPC_SET_RECENT_FOLDER: "IpcSetRecentFolder",
+
+    // The browsing calls have no original counterpart: the plugin page talked
+    // to the drive API from inside its own webview, so there was nothing to
+    // name on this side. This rebuild moves the drive client into the main
+    // process, so the window needs a name to reach it, and these are it. The
+    // `CreatePanWindow` opener is the same convention as the new-task
+    // window's `CreatePreNewTaskWindow`.
+    PAN_LIST_FILES: "PanListFiles",
+    PAN_DOWNLOAD_FILE: "PanDownloadFile",
+    CREATE_PAN_WINDOW: "CreatePanWindow",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",

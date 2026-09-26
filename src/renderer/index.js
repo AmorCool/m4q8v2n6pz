@@ -672,6 +672,13 @@ function init() {
         if (event.key === "Enter") document.getElementById("add").click();
     });
 
+    // The cloud-drive browser. It is its own window, so this is the whole
+    // wiring: ask the main process to open it. The page lists the drive
+    // itself once it is up.
+    document.getElementById("open-pan").addEventListener("click", () => {
+        call("CreatePanWindow");
+    });
+
     document.getElementById("add").addEventListener("click", async () => {
         const url = input.value.trim();
         if (!url) return;

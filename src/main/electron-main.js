@@ -25,6 +25,7 @@ const { createApplication } = require("./index");
 const contract = require("./contract");
 const { WindowManager } = require("./window-manager");
 const { NewTaskService } = require("./newtask");
+const { PanWindowService } = require("./panwindow");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -115,6 +116,7 @@ async function boot() {
 
     let application;
     let newTask = null;
+    let panWindow = null;
     try {
         application = await createApplication();
     } catch (error) {
@@ -145,6 +147,21 @@ async function boot() {
     });
 
     /*
+     * The cloud-drive browser.
+     *
+     * Same shape as the new-task dialog: this process owns the window, the
+     * application owns the drive client, and the page reaches it over the
+     * transport. `ExternalFetchBack` asks for the window through an event
+     * rather than a return value, because opening a window is not something
+     * the (electron-free) application can do.
+     */
+    panWindow = new PanWindowService({
+        windowManager,
+        log: (...a) => console.log("[pan]", ...a),
+    });
+    application.on("open-pan-window", () => panWindow.open());
+
+    /*
      * Server functions that only this process can answer.
      *
      * They are registered on the same mesh the application publishes to, so
@@ -161,6 +178,7 @@ async function boot() {
         [contract.SERVER_FUNCTIONS.CREATE_PRE_NEW_TASK_WINDOW]: fromRenderer((prefill) =>
             newTask.open(prefill)
         ),
+        [contract.SERVER_FUNCTIONS.CREATE_PAN_WINDOW]: fromRenderer(() => panWindow.open()),
     });
 
     await mainWindow.loadFile(path.join(APP_ROOT, "src", "renderer", "index.html"));
