@@ -20,7 +20,7 @@
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
-const { app, BrowserWindow, ipcMain, dialog, session, screen } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, session, screen, shell } = require("electron");
 
 const { createApplication } = require("./index");
 const contract = require("./contract");
@@ -491,6 +491,29 @@ async function boot() {
     // with them, not when the main window happens to close.
     app.once("before-quit", () => {
         for (const detach of detachers) detach();
+    });
+
+    /*
+     * 完成后动作 -- 下载完成后自动打开.
+     *
+     * The original's `TaskDefaultSettings-OpenFile` is read by ConfigHandler
+     * and, when set, the finished task's file is opened
+     * (SETTINGS_SEARCH_NOTIFY_SPEC.md section 1.3(3), the
+     * `onTaskDefaultSettingsChanged` row). Opening a file is an OS action and
+     * this is the only file that knows `electron`, so the check lives here:
+     * the setting is stored and mapped in the application, and acted on at the
+     * one moment a shell is available.
+     *
+     * `shell.openPath` resolves to an error STRING rather than rejecting, so a
+     * failure is logged from the resolved value instead of from a catch.
+     */
+    application.kernel.on(contract.KERNEL_EVENTS.TASK_COMPLETED, (task) => {
+        if (!application.configHandler || !application.configHandler.openFileWhenDone()) return;
+        const target = (task && task.filePath) || "";
+        if (!target) return;
+        shell.openPath(target).then((err) => {
+            if (err) console.log("[settings] could not open the finished file:", err);
+        });
     });
 
     /*
