@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>迅雷任务</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body class="panel" data-skin="default">
+    <!--
+        The float panel.
+
+        This is the second window the original has: `FloatPanelHelper`
+        `getFloatPanelWindow()`, shown with `showInactive()` and placed by
+        `setFloatPanelDirection` (out/suspension-renderer/renderer.js, quoted in
+        UI_SPEC_2 section 1.1b). It is 400x262 because the panel's own stylesheet
+        is -- `.xly-suspension-list{width:400px;height:262px;padding:12px 25px
+        20px 20px}` -- which is also why the ball window is that size.
+
+        It is a window of its own rather than a box inside the ball window for
+        the reason the original gives it one: it must sit on the far side of the
+        ball, and the ball window's 400x262 is already positioned around the
+        ball.
+    -->
+    <div class="xly-suspension-list" id="panel">
+        <header class="xly-suspension-list__head">
+            <span class="xly-suspension-list__title" id="title">迅雷</span>
+            <span class="xly-suspension-list__speed" id="speed"></span>
+        </header>
+
+        <div class="xly-suspension-list__items" id="items"></div>
+        <div class="xly-suspension-list__empty" id="empty">暂无任务</div>
+
+        <footer class="xly-suspension-list__actions">
+            <button id="pause-all" type="button">暂停全部</button>
+            <button id="resume-all" type="button">继续全部</button>
+            <button id="open-main" type="button">打开主界面</button>
+        </footer>
+    </div>
+
+    <script src="panel.js"></script>
+</body>
+</html>

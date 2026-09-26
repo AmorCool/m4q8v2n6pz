@@ -1746,6 +1746,550 @@ async function engineReady(engine, deadlineMs) {
         assert.ok(byId["notice"].textContent.includes("a.bin"), byId["notice"].textContent);
     });
 
+    // -----------------------------------------------------------------------
+    // Suspension window
+    //
+    // Electron cannot start in this environment, so the window itself is a
+    // stub. What is checked is everything that decides where it goes and what
+    // it shows: the clamp the original spells out at out/main.js:302219, the
+    // four panel directions, the click's three branches, and the aggregation
+    // that lets the ball and the panel share one answer. The pages are driven
+    // against a DOM stub for the same reason the pan page is.
+    // -----------------------------------------------------------------------
+    console.log("\nsuspension window");
+
+    const suspension = require("../src/main/suspension");
+
+    test("the four suspension server functions are in the contract", () => {
+        assert.strictEqual(contract.SERVER_FUNCTIONS.GET_MAIN_WINDOW_STATES, "GetMainWindowStates");
+        assert.strictEqual(contract.SERVER_FUNCTIONS.BRING_MAIN_WND_TO_TOP, "BringMainWndToTop");
+        assert.strictEqual(contract.SERVER_FUNCTIONS.SET_SUSPENSION_POSITION, "SetSuspensionPosition");
+        assert.strictEqual(contract.SERVER_FUNCTIONS.GET_SUSPENSION_CONFIG, "GetSuspensionConfig");
+        assert.strictEqual(contract.NATIVE_EVENTS.ON_SUSPENSION_STATE, "onSuspensionState");
+    });
+
+    test("the eight sizes are the original's, and so is the window", () => {
+        assert.strictEqual(suspension.SIZES.autoHideAtX, 380);
+        assert.strictEqual(suspension.SIZES.autoHideAtY, 226);
+        assert.strictEqual(suspension.SIZES.ballSize, 52);
+        assert.strictEqual(suspension.SIZES.ballTop, 10);
+        assert.strictEqual(suspension.SIZES.weltSize, 12);
+        assert.strictEqual(suspension.SIZES.weltTopSize, 62);
+        assert.strictEqual(suspension.SIZES.speedWidth, 72);
+        assert.strictEqual(suspension.SIZES.floatHeight, 262);
+        assert.strictEqual(suspension.WINDOW_OPTIONS.width, 400);
+        assert.strictEqual(suspension.WINDOW_OPTIONS.height, 262);
+    });
+
+    test("the clamp is the original's, constants and all", () => {
+        const area = { x: 0, y: 0, width: 1920, height: 1080 };
+        // Off the bottom-right: x - 84 - 380, y - 226 - 74.
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: 5000, y: 5000 }, area), {
+            x: 1920 - 84 - 380,
+            y: 1080 - 226 - 74,
+        });
+        // Off the top-left: the correction is negative, and deliberately so --
+        // the original lets the ball hang past the corner by autoHideAtX/Y.
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: -5000, y: -5000 }, area), {
+            x: -380,
+            y: -226,
+        });
+        // A spot with room on every side is left alone.
+        assert.deepStrictEqual(suspension.clampToWorkArea({ x: 400, y: 300 }, area), { x: 400, y: 300 });
+    });
+
+    test("the panel offset matches setFloatPanelDirection", () => {
+        const size = { width: 400, height: 262 };
+        assert.deepStrictEqual(suspension.setFloatPanelDirection(suspension.FloatPanelDirection.LeftBottom, size), { x: -400, y: 0 });
+        assert.deepStrictEqual(suspension.setFloatPanelDirection(suspension.FloatPanelDirection.LeftTop, size), { x: -400, y: -262 });
+        assert.deepStrictEqual(suspension.setFloatPanelDirection(suspension.FloatPanelDirection.RightTop, size), { x: 0, y: -262 });
+        assert.deepStrictEqual(suspension.setFloatPanelDirection(suspension.FloatPanelDirection.RightBottom, size), { x: 0, y: 0 });
+    });
+
+    test("the panel opens toward the half with room", () => {
+        const area = { x: 0, y: 0, width: 1920, height: 1080 };
+        const at = (x, y) => ({ x, y, width: 400, height: 262 });
+        assert.strictEqual(suspension.chooseDirection(at(0, 0), area), suspension.FloatPanelDirection.RightBottom);
+        assert.strictEqual(suspension.chooseDirection(at(1800, 0), area), suspension.FloatPanelDirection.LeftBottom);
+        assert.strictEqual(suspension.chooseDirection(at(0, 900), area), suspension.FloatPanelDirection.RightTop);
+        assert.strictEqual(suspension.chooseDirection(at(1800, 900), area), suspension.FloatPanelDirection.LeftTop);
+    });
+
+    test("the ball's anchor is the hexagon's centre, not the window's", () => {
+        // The ball is at top:10px, left:0 and is 52x56, so its centre is 26px in
+        // and 36px down -- not the 200,131 a window-centred anchor would give.
+        assert.deepStrictEqual(suspension.ballAnchor({ x: 100, y: 50 }), { x: 126, y: 86 });
+    });
+
+    /** A registry stub: records sends, positions and show/hide per window. */
+    function fakeSuspensionWindows() {
+        const windows = new Map();
+        const sent = [];
+        const makeWindow = (name) => ({
+            name,
+            lastPosition: null,
+            bounds: { x: 0, y: 0, width: 400, height: 262 },
+            ignoreMouse: null,
+            shown: 0,
+            hidden: 0,
+            loaded: null,
+            _once: {},
+            _on: {},
+            setPosition(x, y) {
+                this.lastPosition = { x, y };
+                this.bounds.x = x;
+                this.bounds.y = y;
+            },
+            getBounds() {
+                return Object.assign({}, this.bounds);
+            },
+            showInactive() {
+                this.shown += 1;
+            },
+            hide() {
+                this.hidden += 1;
+            },
+            setAlwaysOnTop() {},
+            setIgnoreMouseEvents(ignore, opts) {
+                this.ignoreMouse = { ignore, opts };
+            },
+            loadFile(file) {
+                this.loaded = file;
+            },
+            once(event, fn) {
+                (this._once[event] = this._once[event] || []).push(fn);
+            },
+            on(event, fn) {
+                (this._on[event] = this._on[event] || []).push(fn);
+            },
+            isDestroyed() {
+                return false;
+            },
+            fireOnce(event) {
+                for (const fn of this._once[event] || []) fn();
+            },
+            webContents: {
+                send(channel, payload) {
+                    sent.push({ channel, payload, window: name });
+                },
+            },
+        });
+        return {
+            windows,
+            sent,
+            openWindow(name) {
+                if (!windows.has(name)) windows.set(name, makeWindow(name));
+                return windows.get(name);
+            },
+            getWindow(name) {
+                return windows.get(name) || null;
+            },
+            broadcast(channel, payload) {
+                sent.push({ channel, payload });
+            },
+        };
+    }
+
+    test("the ball starts off-screen and click-through", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({ windowManager: wm });
+        const win = svc.startSuspensionWindow({ x: null, y: null });
+        // Off-screen first: a transparent window shown before its page paints
+        // is a solid rectangle for one frame.
+        assert.deepStrictEqual(win.lastPosition, { x: -999, y: -999 });
+        assert.strictEqual(win.ignoreMouse.ignore, true);
+        assert.strictEqual(win.ignoreMouse.opts.forward, true, "forward keeps mousemove reaching the page");
+        assert.ok(win.loaded.endsWith("index.html"), win.loaded);
+    });
+
+    test("the first paint puts the ball in the bottom-right of the work area", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({
+            windowManager: wm,
+            getPrimaryWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+        });
+        const win = svc.startSuspensionWindow({ x: null, y: null });
+        win.fireOnce("ready-to-show");
+        assert.deepStrictEqual(win.lastPosition, { x: 1456, y: 780 });
+        assert.strictEqual(win.shown, 1);
+    });
+
+    test("a saved position wins over the default corner", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({
+            windowManager: wm,
+            getPrimaryWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+            loadPosition: () => ({ x: 300, y: 200 }),
+        });
+        const win = svc.startSuspensionWindow({ x: null, y: null });
+        win.fireOnce("ready-to-show");
+        assert.deepStrictEqual(win.lastPosition, { x: 300, y: 200 });
+    });
+
+    test("a drag moves the window and the release clamps and saves it", () => {
+        const wm = fakeSuspensionWindows();
+        const saved = [];
+        const svc = new suspension.SuspensionService({
+            windowManager: wm,
+            getDisplayForPoint: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 }),
+            persistPosition: (pos) => saved.push(pos),
+        });
+        const win = svc.startSuspensionWindow({ x: 100, y: 100 });
+
+        // Mid-drag is unclamped on purpose: clamping while the button is down
+        // makes the ball stick to the edge and jump when the pointer returns.
+        svc.handleAction({ type: "drag", x: 5000, y: 5000 });
+        assert.deepStrictEqual(win.lastPosition, { x: 5000, y: 5000 });
+
+        svc.handleAction({ type: "dragEnd", x: 5000, y: 5000 });
+        assert.deepStrictEqual(win.lastPosition, { x: 1456, y: 780 });
+        assert.strictEqual(saved.length, 1);
+        assert.deepStrictEqual(saved[0], { x: 1456, y: 780 });
+    });
+
+    test("the ball's click raises, dismisses or restores the main window", () => {
+        const cases = [
+            [{ minimized: true, visible: false, focused: false }, "restore"],
+            [{ minimized: false, visible: true, focused: true }, "hide"],
+            [{ minimized: false, visible: true, focused: false }, "show"],
+        ];
+        for (const [states, expected] of cases) {
+            const counts = { brought: 0, hidden: 0 };
+            const svc = new suspension.SuspensionService({
+                windowManager: fakeSuspensionWindows(),
+                getMainWindowStates: () => states,
+                bringMainToTop: () => {
+                    counts.brought += 1;
+                },
+                hideMainWindow: () => {
+                    counts.hidden += 1;
+                },
+            });
+            assert.strictEqual(svc.showOrHideMainWindow(), expected);
+            assert.strictEqual(counts.brought, expected === "hide" ? 0 : 1);
+            assert.strictEqual(counts.hidden, expected === "hide" ? 1 : 0);
+        }
+    });
+
+    test("hovering the ball shows the panel on the roomy side and unblocks clicks", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({
+            windowManager: wm,
+            getPrimaryWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+            getDisplayForPoint: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 }, scaleFactor: 1 }),
+        });
+        const ball = svc.startSuspensionWindow({ x: 1400, y: 700 });
+        ball.fireOnce("ready-to-show");
+
+        svc.handleAction({ type: "hover" });
+        const panel = wm.getWindow(suspension.PANEL_WINDOW);
+        assert.ok(panel, "the panel window must exist");
+        assert.strictEqual(panel.shown, 1);
+        assert.strictEqual(ball.ignoreMouse.ignore, false, "clicks must reach the ball while it is hovered");
+        // Ball at 1400,700 -> anchor 1426,736, which is in the right/bottom
+        // quadrant, so the panel goes left and up: LeftTop.
+        assert.deepStrictEqual(panel.lastPosition, { x: 1426 - 400, y: 736 - 262 });
+
+        svc.handleAction({ type: "leave" });
+        assert.strictEqual(ball.ignoreMouse.ignore, true, "clicks must pass through again once the pointer leaves");
+    });
+
+    test("kernel events merge into one summary both windows can read", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({ windowManager: wm });
+
+        svc.onKernelEvent("OnTaskInserted", {
+            taskId: "t1", name: "a.bin", status: 1, totalSize: 100, completedSize: 25, downloadSpeed: 500,
+        });
+        // A detail event carries no name; a replace would drop it.
+        svc.onKernelEvent("OnTaskDetailChanged", { taskId: "t1", completedSize: 50, downloadSpeed: 700 });
+        const state = svc.updateSuspensionState();
+
+        assert.strictEqual(state.tasks.length, 1);
+        assert.strictEqual(state.tasks[0].name, "a.bin", "a detail event must not drop the name");
+        assert.strictEqual(state.progress, 0.5, "progress is bytes, not a mean of percentages");
+        assert.strictEqual(state.speed, 700);
+        assert.strictEqual(state.activeCount, 1);
+        assert.strictEqual(state.isDowning, true);
+
+        const last = wm.sent[wm.sent.length - 1];
+        assert.strictEqual(last.channel, "native-event");
+        assert.strictEqual(last.payload.name, "onSuspensionState");
+        assert.strictEqual(last.payload.payload.activeCount, 1);
+    });
+
+    test("a removed task leaves the summary", () => {
+        const wm = fakeSuspensionWindows();
+        const svc = new suspension.SuspensionService({ windowManager: wm });
+        svc.onKernelEvent("OnTaskInserted", { taskId: "t1", status: 1, totalSize: 10, completedSize: 0 });
+        svc.onKernelEvent("OnTaskRemoved", { taskId: "t1" });
+        const state = svc.updateSuspensionState();
+        assert.strictEqual(state.tasks.length, 0);
+        assert.strictEqual(state.activeCount, 0);
+        assert.strictEqual(state.isDowning, false);
+    });
+
+    test("the status line says what the ball is doing", () => {
+        assert.strictEqual(suspension.defaultStatusText(2, 3, false, false), "下载中 2 个任务");
+        assert.strictEqual(suspension.defaultStatusText(0, 0, false, false), "暂无任务");
+        assert.strictEqual(suspension.defaultStatusText(0, 2, true, false), "全部完成");
+        assert.strictEqual(suspension.defaultStatusText(0, 2, false, true), "有任务失败");
+        assert.strictEqual(suspension.defaultStatusText(0, 2, false, false), "已暂停");
+    });
+
+    // --- the two pages, against a DOM stub --------------------------------
+
+    /** A DOM small enough for the suspension pages and no smaller. */
+    function makeSuspensionDom(ids) {
+        const makeElement = (tag) => {
+            const el = {
+                tagName: String(tag || "div").toUpperCase(),
+                children: [],
+                _text: "",
+                className: "",
+                title: "",
+                type: "",
+                disabled: false,
+                value: "",
+                dataset: {},
+                style: {},
+                _listeners: {},
+                _rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 },
+                appendChild(child) {
+                    this.children.push(child);
+                    child.parentNode = this;
+                    return child;
+                },
+                append(...kids) {
+                    for (const kid of kids) this.appendChild(kid);
+                },
+                setAttribute(key, value) {
+                    this[key] = value;
+                },
+                addEventListener(name, fn) {
+                    (this._listeners[name] = this._listeners[name] || []).push(fn);
+                },
+                removeEventListener() {},
+                getBoundingClientRect() {
+                    return this._rect;
+                },
+                dispatch(name, event) {
+                    for (const fn of this._listeners[name] || []) fn(event || {});
+                },
+            };
+            Object.defineProperty(el, "textContent", {
+                get() {
+                    return this.children.length
+                        ? this.children.map((child) => child.textContent).join("")
+                        : this._text;
+                },
+                set(value) {
+                    this._text = String(value);
+                    this.children.length = 0;
+                },
+            });
+            const classes = new Set();
+            el.classList = {
+                add: (...names) => names.forEach((name) => classes.add(name)),
+                remove: (...names) => names.forEach((name) => classes.delete(name)),
+                toggle: (name, force) => {
+                    const on = force === undefined ? !classes.has(name) : !!force;
+                    if (on) classes.add(name);
+                    else classes.delete(name);
+                    return on;
+                },
+                contains: (name) => classes.has(name),
+            };
+            return el;
+        };
+
+        const byId = {};
+        for (const id of ids) byId[id] = makeElement("div");
+        const documentStub = {
+            body: makeElement("body"),
+            _listeners: {},
+            getElementById: (id) => byId[id] || null,
+            createElement: makeElement,
+            addEventListener(name, fn) {
+                (this._listeners[name] = this._listeners[name] || []).push(fn);
+            },
+            dispatch(name, event) {
+                for (const fn of this._listeners[name] || []) fn(event || {});
+            },
+        };
+        return { byId, documentStub, makeElement };
+    }
+
+    /** Load a page under a vm with the DOM stub, and hand back its channels. */
+    function loadSuspensionPage(relative, ids) {
+        const vm = require("vm");
+        const source = fs.readFileSync(
+            path.join(__dirname, "..", "src", "windows", "suspension", relative),
+            "utf8"
+        );
+        const dom = makeSuspensionDom(ids);
+
+        const actions = [];
+        let nativeHandler = null;
+        const sandbox = {
+            document: dom.documentStub,
+            console,
+            setTimeout,
+            clearTimeout,
+        };
+        sandbox.window = sandbox;
+        sandbox.thunderx = {
+            suspensionAction: (action) => actions.push(action),
+            onNativeEvent: (fn) => {
+                nativeHandler = fn;
+            },
+        };
+        vm.createContext(sandbox);
+        vm.runInContext(source, sandbox, { filename: relative });
+
+        return { dom, actions, emit: (envelope) => nativeHandler && nativeHandler(envelope) };
+    }
+
+    test("the ball page draws the summary and reports its gestures", () => {
+        const page = loadSuspensionPage("index.js", [
+            "ball", "ring", "percent", "hit", "bubble", "bubble-text", "bubble-red", "bubble-btn",
+        ]);
+        const { byId } = page.dom;
+        byId["hit"]._rect = { left: 0, top: 0, right: 56, bottom: 74, width: 56, height: 74 };
+
+        page.emit({ name: "onSuspensionState", payload: { progress: 0.42, isDowning: true, skin: 0 } });
+        assert.strictEqual(byId["percent"].textContent, "42%");
+        assert.strictEqual(byId["ring"].style.strokeDashoffset, "58", "the arc is the missing percentage");
+        assert.strictEqual(page.dom.documentStub.body.dataset.mode, "down");
+
+        // Over the ball, then off it: the main process toggles mouse pass-through
+        // on exactly these two messages.
+        page.dom.documentStub.dispatch("mousemove", { clientX: 20, clientY: 20, screenX: 0, screenY: 0 });
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "hover");
+        page.dom.documentStub.dispatch("mousemove", { clientX: 300, clientY: 200, screenX: 0, screenY: 0 });
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "leave");
+
+        // A press that moves is a drag; the window origin is screen - client,
+        // so the new origin is (1000-20, 500-20) shifted by the pointer's move.
+        byId["hit"].dispatch("mousedown", { button: 0, screenX: 1000, screenY: 500, clientX: 20, clientY: 20 });
+        page.dom.documentStub.dispatch("mousemove", { clientX: 40, clientY: 30, screenX: 1020, screenY: 510 });
+        const drag = page.actions[page.actions.length - 1];
+        assert.strictEqual(drag.type, "drag");
+        assert.deepStrictEqual({ x: drag.x, y: drag.y }, { x: 1000, y: 490 });
+
+        page.dom.documentStub.dispatch("mouseup", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "dragEnd");
+
+        // A press that does not move is a click.
+        byId["hit"].dispatch("mousedown", { button: 0, screenX: 1000, screenY: 500, clientX: 20, clientY: 20 });
+        page.dom.documentStub.dispatch("mouseup", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "leftClick");
+
+        byId["hit"].dispatch("dblclick", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "leftDBClick");
+
+        let prevented = false;
+        byId["hit"].dispatch("contextmenu", {
+            preventDefault() {
+                prevented = true;
+            },
+        });
+        assert.ok(prevented, "the page's own menu must not appear");
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "rightClick");
+
+        byId["bubble-btn"].dispatch("click", {});
+        const bubble = page.actions[page.actions.length - 1];
+        assert.strictEqual(bubble.type, "bubbleBtn");
+        assert.strictEqual(bubble.index, 4, "the original reports the button by index 4");
+    });
+
+    test("the ball page applies the bubble and the skin", () => {
+        const page = loadSuspensionPage("index.js", [
+            "ball", "ring", "percent", "hit", "bubble", "bubble-text", "bubble-red", "bubble-btn",
+        ]);
+        const { byId } = page.dom;
+
+        page.emit({ type: "bubble", field: "text", value: "会员加速试用中" });
+        assert.strictEqual(byId["bubble-text"].textContent, "会员加速试用中");
+        page.emit({ type: "bubble", field: "red", value: "2026-01-01 到期" });
+        assert.ok(!byId["bubble-red"].classList.contains("is-hidden"));
+        page.emit({ type: "bubble", field: "show" });
+        assert.ok(!byId["bubble"].classList.contains("is-hidden"));
+        page.emit({ type: "bubble", field: "hide" });
+        assert.ok(byId["bubble"].classList.contains("is-hidden"));
+
+        page.emit({ name: "onSuspensionState", payload: { progress: 1, isDowning: false, skin: 1 } });
+        assert.strictEqual(page.dom.documentStub.body.dataset.skin, "vip");
+        assert.strictEqual(byId["percent"].textContent, "100%");
+    });
+
+    test("the panel page lists tasks and wires its buttons", () => {
+        const page = loadSuspensionPage("panel.js", [
+            "panel", "title", "speed", "items", "empty", "pause-all", "resume-all", "open-main",
+        ]);
+        const { byId } = page.dom;
+
+        assert.ok(!byId["empty"].classList.contains("is-hidden"), "an empty list says so");
+
+        page.emit({
+            name: "onSuspensionState",
+            payload: {
+                activeCount: 1,
+                speed: 2048,
+                skin: 0,
+                statusText: "下载中 1 个任务",
+                tasks: [
+                    { taskId: "t1", name: "a.bin", status: 1, totalSize: 100, completedSize: 50 },
+                    { taskId: "t2", name: "b.bin", status: 3, totalSize: 10, completedSize: 10 },
+                ],
+            },
+        });
+
+        assert.strictEqual(byId["items"].children.length, 2);
+        assert.strictEqual(byId["title"].textContent, "正在下载 1 个任务");
+        assert.strictEqual(byId["speed"].textContent, "2.0 KB/s");
+        assert.ok(byId["empty"].classList.contains("is-hidden"));
+        // Newest first: the task the user just added is the one they want.
+        assert.strictEqual(byId["items"].children[0].dataset.taskId, "t2");
+        assert.strictEqual(byId["items"].children[1].dataset.taskId, "t1");
+        assert.strictEqual(byId["items"].children[1].dataset.status, "active");
+        // name, bar, status; the bar's fill carries the fraction.
+        assert.strictEqual(byId["items"].children[1].children[1].children[0].style.width, "50.0%");
+
+        byId["pause-all"].disabled = false;
+        byId["items"].children[1].dispatch("click", {});
+        const open = page.actions[page.actions.length - 1];
+        assert.strictEqual(open.type, "openTask");
+        assert.strictEqual(open.taskId, "t1");
+
+        byId["pause-all"].dispatch("click", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "pauseAll");
+        byId["resume-all"].dispatch("click", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "resumeAll");
+        byId["open-main"].dispatch("click", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "openTask");
+
+        // Entering the panel cancels the ball's hide timer; leaving restarts it.
+        byId["panel"].dispatch("mouseenter", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "panelEnter");
+        byId["panel"].dispatch("mouseleave", {});
+        assert.strictEqual(page.actions[page.actions.length - 1].type, "panelLeave");
+    });
+
+    test("the panel disables a button that would do nothing", () => {
+        const page = loadSuspensionPage("panel.js", [
+            "panel", "title", "speed", "items", "empty", "pause-all", "resume-all", "open-main",
+        ]);
+        const { byId } = page.dom;
+
+        page.emit({
+            name: "onSuspensionState",
+            payload: { activeCount: 0, speed: 0, tasks: [{ taskId: "t1", status: 3, totalSize: 1, completedSize: 1 }] },
+        });
+        assert.strictEqual(byId["pause-all"].disabled, true, "nothing is downloading");
+        assert.strictEqual(byId["resume-all"].disabled, true, "nothing is paused or failed");
+    });
+
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exit(failed === 0 ? 0 : 1);
 })();

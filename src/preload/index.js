@@ -50,4 +50,19 @@ contextBridge.exposeInMainWorld("thunderx", {
      * the sender, so this stays correct with more than one dialog.
      */
     closeWindow: () => ipcRenderer.send("window:close"),
+
+    /*
+     * A gesture from the floating ball or its panel.
+     *
+     * The suspension windows report pointer events -- hover, drag, click, the
+     * panel's buttons -- rather than calling server functions, because a
+     * gesture is not a service call: `hover` has to reach the main process
+     * before the click it precedes, and a promise-returning RPC would put a
+     * microtask between the two. It is a one-way send for the same reason.
+     *
+     * The payload is `{ type, ... }` and the main process validates the type;
+     * a renderer cannot reach anything through this that the ball itself could
+     * not do, because every branch it selects is a window gesture.
+     */
+    suspensionAction: (action) => ipcRenderer.send("suspension-action", action),
 });

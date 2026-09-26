@@ -19,13 +19,15 @@
 
 const path = require("path");
 const os = require("os");
-const { app, BrowserWindow, ipcMain, dialog, session } = require("electron");
+const fs = require("fs");
+const { app, BrowserWindow, ipcMain, dialog, session, screen } = require("electron");
 
 const { createApplication } = require("./index");
 const contract = require("./contract");
 const { WindowManager } = require("./window-manager");
 const { NewTaskService } = require("./newtask");
 const { PanWindowService } = require("./panwindow");
+const { SuspensionService, WINDOW_NAME: SUSPENSION_WINDOW } = require("./suspension");
 
 const APP_ROOT = path.resolve(__dirname, "..", "..");
 
@@ -36,6 +38,18 @@ function defaultDownloadDir(application) {
         (application && application.config && application.config.downloadDir) ||
         path.join(os.homedir(), "ThunderX")
     );
+}
+
+/*
+ * Where the ball's position is remembered.
+ *
+ * `config/app.json` holds the *defaults* (`suspension: { x, y }`), and it is a
+ * tracked file that a running client must not rewrite. The position the user
+ * drags to is runtime state, so it goes to the user-data directory beside
+ * Electron's own files, and `loadPosition` reads it back on the next launch.
+ */
+function suspensionStatePath() {
+    return path.join(app.getPath("userData"), "suspension.json");
 }
 
 /*
@@ -117,6 +131,7 @@ async function boot() {
     let application;
     let newTask = null;
     let panWindow = null;
+    let suspension = null;
     try {
         application = await createApplication();
     } catch (error) {
@@ -162,6 +177,106 @@ async function boot() {
     application.on("open-pan-window", () => panWindow.open());
 
     /*
+     * The floating ball and its panel.
+     *
+     * This is the only place that knows about screens and native menus, which
+     * is why every one of them is injected: `suspension.js` stays loadable
+     * under plain node so its geometry -- the clamp, the panel direction -- can
+     * be tested without an Electron process.
+     *
+     * The two window controls the ball's click needs are the ones the original
+     * registered as server functions (`GetMainWindowStates`, `BringMainWndToTop`).
+     * They are wired to the main window here rather than in `index.js` because
+     * the application is deliberately kept free of anything Electron.
+     */
+    const mainWindowOf = () => windowManager.getWindow("main");
+    suspension = new SuspensionService({
+        windowManager,
+        getPrimaryWorkArea: () => screen.getPrimaryDisplay().workArea,
+        getDisplayForPoint: (x, y) => {
+            const display = screen.getDisplayNearestPoint({ x: Math.round(x), y: Math.round(y) });
+            return { workArea: display.workArea, scaleFactor: display.scaleFactor };
+        },
+        getMainWindowStates: () => {
+            const win = mainWindowOf();
+            if (!win) return { minimized: false, visible: false, maximized: false, focused: false };
+            return {
+                minimized: win.isMinimized(),
+                visible: win.isVisible(),
+                maximized: win.isMaximized(),
+                focused: win.isFocused(),
+            };
+        },
+        bringMainToTop: () => {
+            const win = mainWindowOf();
+            if (!win) return;
+            // `restore` before `show`: a minimised window that is shown without
+            // being restored stays in the taskbar's minimised state.
+            if (win.isMinimized()) win.restore();
+            win.show();
+            win.focus();
+        },
+        hideMainWindow: () => {
+            const win = mainWindowOf();
+            if (!win) return;
+            win.minimize();
+            win.hide();
+        },
+        // The two "all" buttons on the panel. Only a task that would actually
+        // move is touched, so a click on 继续全部 does not restart a download
+        // that is already running.
+        pauseAllTasks: () => {
+            for (const task of application.kernel.getAllTasks()) {
+                if (Number(task.status) === 1) application.kernel.pauseTask(task.taskId);
+            }
+        },
+        resumeAllTasks: () => {
+            for (const task of application.kernel.getAllTasks()) {
+                const status = Number(task.status);
+                if (status === 2 || status === 4) application.kernel.startTask(task.taskId);
+            }
+        },
+        persistPosition: (pos) => {
+            try {
+                fs.writeFileSync(suspensionStatePath(), JSON.stringify(pos));
+            } catch (err) {
+                // Losing the position is a nuisance, not a failure worth
+                // stopping a download for.
+                console.log("[suspension] could not save position:", err.message);
+            }
+        },
+        loadPosition: () => {
+            try {
+                return JSON.parse(fs.readFileSync(suspensionStatePath(), "utf8"));
+            } catch (err) {
+                return { x: null, y: null };
+            }
+        },
+        getVipInfo: () => (application.login && application.login.vipInfo) || { isVip: false },
+        log: (...a) => console.log("[suspension]", ...a),
+    });
+
+    /*
+     * The right-click menu.
+     *
+     * The original's menu lives in its native addon
+     * (`FloatPanelMenuHelper.popupMenu()`, UI_SPEC_2 section 1.1j, which notes
+     * the items themselves were not recoverable). The four here are the ones
+     * the panel offers, plus the separator before 退出.
+     */
+    suspension.setRightClickUpCallback(() => {
+        const { Menu } = require("electron");
+        const menu = Menu.buildFromTemplate([
+            { label: "打开主界面", click: () => suspension.showMainWindow() },
+            { label: "暂停全部", click: () => suspension.pauseAll() },
+            { label: "继续全部", click: () => suspension.resumeAll() },
+            { type: "separator" },
+            { label: "退出", click: () => app.quit() },
+        ]);
+        menu.popup({ window: windowManager.getWindow(SUSPENSION_WINDOW) || undefined });
+    });
+
+    /*
      * Server functions that only this process can answer.
      *
      * They are registered on the same mesh the application publishes to, so
@@ -179,6 +294,34 @@ async function boot() {
             newTask.open(prefill)
         ),
         [contract.SERVER_FUNCTIONS.CREATE_PAN_WINDOW]: fromRenderer(() => panWindow.open()),
+        // The ball's four. The first two are the original's own names, called
+        // by its suspension renderer's `showOrHideMainWindow`; the last two
+        // stand in for the `SetConfigValue("ConfigSuspension", ...)` pair the
+        // original used, which this build has no config store for.
+        [contract.SERVER_FUNCTIONS.GET_MAIN_WINDOW_STATES]: fromRenderer(() =>
+            suspension.getMainWindowStates()
+        ),
+        [contract.SERVER_FUNCTIONS.BRING_MAIN_WND_TO_TOP]: fromRenderer(() =>
+            suspension.showMainWindow()
+        ),
+        [contract.SERVER_FUNCTIONS.SET_SUSPENSION_POSITION]: fromRenderer((x, y) =>
+            suspension.setSuspensionWindowPos(x, y, false)
+        ),
+        [contract.SERVER_FUNCTIONS.GET_SUSPENSION_CONFIG]: fromRenderer(() =>
+            suspension.getSuspensionConfig()
+        ),
+    });
+
+    /*
+     * Gestures from the ball and the panel.
+     *
+     * A one-way channel rather than an RPC: `hover` has to reach this process
+     * before the click that follows it, and the ball window is still passing
+     * mouse events through at that moment. Resolved from the payload's `type`
+     * only -- the sender is not trusted for anything else.
+     */
+    ipcMain.on("suspension-action", (_event, action) => {
+        suspension.handleAction(action);
     });
 
     await mainWindow.loadFile(path.join(APP_ROOT, "src", "renderer", "index.html"));
@@ -194,6 +337,33 @@ async function boot() {
         return (application.pendingWebviews || []).map(toViewDescriptor);
     });
     mainWindow.webContents.on("did-finish-load", deliverViews);
+
+    /*
+     * Show the ball.
+     *
+     * It is the client's signature element, so it is up from the start rather
+     * than only while something is downloading -- the original's
+     * `updateSuspensionState` decides that per state, but a ball that is
+     * invisible until a download begins is a ball nobody knows exists.
+     *
+     * `showSuspension: false` in the config is the opt-out, and the saved
+     * position comes from the config file's defaults; the position the user
+     * drags to is written to the user-data directory, not back into the tracked
+     * config.
+     */
+    if (application.config.showSuspension !== false) {
+        suspension.startSuspensionWindow(application.config.suspension || {});
+    }
+
+    /*
+     * The ball steps aside for a maximised main window.
+     *
+     * This is the original's `canHideWindow`: a full-screen main window and a
+     * ball floating over it are two things competing for the same corner, and
+     * the ball loses. It comes back when the window is restored.
+     */
+    mainWindow.on("maximize", () => suspension.hideSuspensionWindow());
+    mainWindow.on("unmaximize", () => suspension.showSuspensionWindow());
 
     /*
      * Events the kernel raises go to every window.
@@ -224,6 +394,15 @@ async function boot() {
         const listener = relay(name);
         application.mesh.renderer.attachServerEvent(name, listener);
         detachers.push(() => application.mesh.renderer.detachServerEvent(name, listener));
+
+        // The ball does not read the raw events: a detail event carries no name
+        // and a status event carries no size, so something has to merge them.
+        // That merge lives in the suspension service, and this is where its
+        // input is attached -- the same events, the same moment, one listener
+        // further along.
+        const feed = (payload) => suspension.onKernelEvent(name, payload);
+        application.mesh.renderer.attachServerEvent(name, feed);
+        detachers.push(() => application.mesh.renderer.detachServerEvent(name, feed));
     }
     // One handler for the whole set: the listeners belong to the registry
     // rather than to one window, so they are dropped when the process is done

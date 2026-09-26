@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>迅雷悬浮窗</title>
+    <link rel="stylesheet" href="index.css">
+</head>
+<body class="suspension" data-mode="normal" data-skin="default">
+    <!--
+        The ball.
+
+        This window is 400x262 and transparent, but only the 56x74 hit
+        rectangle is meant to be touched; the rest is empty so the bubble card
+        has room. The main process keeps the window passing mouse events
+        through (`setIgnoreMouseEvents(true, { forward: true })`) and turns that
+        off only while the pointer is over the ball, which is why this page has
+        to report hover and leave rather than simply listening for a click.
+
+        The hexagon is the original's clip-path, not an image: the archive has
+        no ball sprite (`imgs/` has no `susp` match), and the original itself
+        draws it in CSS.
+    -->
+    <div class="xly-suspension" id="ball">
+        <div class="xly-suspension-polygon"></div>
+
+        <!--
+            Progress arc.
+
+            `pathLength="100"` normalises the perimeter, so one dash unit is
+            one percent and the page only ever writes `stroke-dashoffset`.
+            The path spells out the same six points as the clip-path polygon
+            above, in a 52x56 viewBox.
+        -->
+        <svg class="xly-suspension-svg" viewBox="0 0 52 56" aria-hidden="true">
+            <path class="ring-track" pathLength="100"
+                  d="M26.5 0 L52 15.7 L52 42.6 L26 56 L0.5 42 L0 15.7 Z"></path>
+            <path class="ring-progress" id="ring" pathLength="100"
+                  d="M26.5 0 L52 15.7 L52 42.6 L26 56 L0.5 42 L0 15.7 Z"></path>
+        </svg>
+
+        <span class="xly-suspension-percent" id="percent">0%</span>
+
+        <!-- The hit rectangle. Last, so it is on top of everything the ball
+             draws and nothing steals its pointer events. -->
+        <div class="xly-suspension-area" id="hit" title="迅雷"></div>
+
+        <!--
+            The bubble card.
+
+            UI_SPEC_2 section 1.1g: the original uses it for VIP / trial
+            notices only -- the payload it stores is `userId + "_ShowDate"`,
+            i.e. "once a day per account". Task-completion notices are a
+            different feature and are not duplicated here.
+        -->
+        <div class="xly-suspension-card is-hidden" id="bubble">
+            <p class="xly-suspension-card__text" id="bubble-text"></p>
+            <p class="xly-suspension-card__red is-hidden" id="bubble-red"></p>
+            <button class="xly-suspension-card__btn is-hidden" id="bubble-btn" type="button"></button>
+        </div>
+    </div>
+
+    <script src="index.js"></script>
+</body>
+</html>

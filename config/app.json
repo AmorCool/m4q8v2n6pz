@@ -15,5 +15,9 @@
     "downloadDir": "",
 
     "_comment_endpoints": "Override only when pointing at a test environment.",
-    "endpoints": {}
+    "endpoints": {},
+
+    "_comment_suspension": "The floating ball. showSuspension=false keeps it hidden. The suspension block is only the starting position: null x/y means 'bottom-right, as the original ships it'. The spot the user drags the ball to is runtime state and is saved to the user-data directory, not written back here.",
+    "showSuspension": true,
+    "suspension": { "x": null, "y": null }
 }

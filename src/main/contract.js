@@ -231,6 +231,24 @@ const SERVER_FUNCTIONS = Object.freeze({
     PAN_DOWNLOAD_FILE: "PanDownloadFile",
     CREATE_PAN_WINDOW: "CreatePanWindow",
 
+    // --- suspension (the floating ball) ---------------------------------------
+    //
+    // The first two names are the original's own. Its suspension renderer's
+    // `showOrHideMainWindow` asks `GetMainWindowStates` and then calls
+    // `BringMainWndToTop` (out/suspension-renderer/renderer.js, quoted in
+    // UI_SPEC_2 section 1.1e), so a plugin or page that still calls them lands
+    // on the same handlers.
+    //
+    // The original stores the ball's position through
+    // `SetConfigValue("ConfigSuspension", "SuspensionX"/"SuspensionY", ...)`.
+    // This rebuild has a config file rather than a config store, so the same
+    // read and write get a name of their own instead of borrowing the
+    // generic Get/SetConfigValue pair, which does not exist here.
+    GET_MAIN_WINDOW_STATES: "GetMainWindowStates",
+    BRING_MAIN_WND_TO_TOP: "BringMainWndToTop",
+    SET_SUSPENSION_POSITION: "SetSuspensionPosition",
+    GET_SUSPENSION_CONFIG: "GetSuspensionConfig",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",
@@ -252,6 +270,13 @@ const NATIVE_EVENTS = Object.freeze({
     // clipboard) has to wait for the page: the window is created before its
     // renderer exists, so sending at open time would reach nobody.
     ON_NEW_TASK_PREFILL: "onNewTaskPrefill",
+    // The ball and its panel are two windows that both draw kernel state and
+    // neither holds the kernel. The main process already forwards every kernel
+    // event; it merges them into one summary and sends this as well, so the two
+    // windows cannot disagree about what is downloading. It is a native event
+    // rather than a second channel because it travels the same road -- see
+    // electron-main's relay.
+    ON_SUSPENSION_STATE: "onSuspensionState",
 });
 
 /** Download kernel events, forwarded verbatim to the JS side. */
