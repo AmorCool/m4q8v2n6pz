@@ -150,6 +150,25 @@ const SERVER_FUNCTIONS = Object.freeze({
     SELECT_CATEGORY_VIEW: "SelectCategoryView",
     GET_CONFIG_MODULES: "GetConfigModules",
 
+    // --- task: mutations ------------------------------------------------------
+    //
+    // The original renderer holds the kernel object directly and calls
+    // `deleteTask` / `startTask` on it, so it never needed these to exist as
+    // server functions. This rebuild keeps the kernel in the main process --
+    // which is where the engine lives and where the plugin contract already
+    // puts it -- so the renderer needs a way to reach the same operations, and
+    // these are it.
+    //
+    // The names are the ones the original's own task commands use
+    // (`CreateNewTask`, `PauseTask`, `DeleteTask`, all read off the released
+    // renderer bundle), so a name here means the same thing it means there.
+    CREATE_NEW_TASK: "CreateNewTask",
+    PAUSE_TASK: "PauseTask",
+    RESUME_TASK: "ResumeTask",
+    DELETE_TASK: "DeleteTask",
+    GET_TASK_BASE_INFO: "GetTaskBaseInfo",
+    GET_ALL_TASK_BASE_INFO: "GetAllTaskBaseInfo",
+
     // --- plugin control -----------------------------------------------------
     SET_PLUGIN_STATUS: "SetPluginStatus",
     TRACK_EVENT: "TrackEvent",

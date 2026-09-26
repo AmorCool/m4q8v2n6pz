@@ -930,6 +930,82 @@ console.log("\nboot");
         }
     });
 
+    /*
+     * The renderer reaches the kernel through server functions rather than by
+     * holding the kernel object, so these go through the same transport a
+     * plugin uses -- including the two leading context arguments every
+     * registered handler strips. Calling the kernel directly would pass even if
+     * the names or the argument order were wrong, which is exactly the mistake
+     * worth catching here.
+     */
+    await testAsync("the renderer's task functions are reachable over the transport", async () => {
+        const app = await createApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+        const context = { id: "renderer" };
+        const call = (name, ...args) =>
+            app.mesh.main.callServerFunction(name, context, context, ...args);
+
+        const taskId = await call("CreateNewTask", { url: "http://example.com/a.bin" });
+        assert.ok(taskId, "CreateNewTask must return a task id");
+
+        const listed = await call("GetAllTaskBaseInfo");
+        assert.strictEqual(listed.length, 1, "the task must appear in the listing");
+        assert.strictEqual(listed[0].taskId, taskId);
+
+        const one = await call("GetTaskBaseInfo", taskId);
+        assert.strictEqual(one.url, "http://example.com/a.bin");
+
+        // Pause and resume are forwarded to the engine. With the stub in place
+        // they are no-ops, but they must still resolve rather than throw --
+        // a missing registration would come back as a rejection here.
+        await call("PauseTask", taskId);
+        await call("ResumeTask", taskId);
+
+        await call("DeleteTask", taskId);
+        const after = await call("GetAllTaskBaseInfo");
+        assert.strictEqual(after.length, 0, "the task must be gone after DeleteTask");
+
+        await app.stop();
+    });
+
+    await testAsync("an unregistered method resolves to nothing rather than throwing", async () => {
+        const app = await createApplication({
+            config: {
+                appid: "a", appkey: "k", package: "p", clientVersion: "1.0.0.1",
+                aria2Path: "/definitely/not/here/aria2c",
+            },
+        });
+        const context = { id: "renderer" };
+
+        // This is the shipped transport's behaviour, not an oversight: a call
+        // to a name nobody registered comes back as `[null, message]`, and
+        // `callServerFunction` unwraps that to `null`. A renderer therefore
+        // cannot tell a missing method from one that returned nothing, which
+        // is why the renderer treats a null result as a failure rather than
+        // trusting it. The test pins the behaviour so a future change to it is
+        // a deliberate one.
+        const value = await app.mesh.main.callServerFunction("NoSuchFunction", context, context);
+        assert.strictEqual(value, null, "a missing method must not resolve to a value");
+
+        // The tuple form is where the reason is still visible.
+        const [result, message] = await app.mesh.main.callServerFunctionEx(
+            "NoSuchFunction",
+            context,
+            context
+        );
+        assert.strictEqual(result, null);
+        assert.ok(
+            String(message).includes("NoSuchFunction"),
+            "the message must name the method that was missing"
+        );
+
+        await app.stop();
+    });
+
     console.log(`\n${passed} passed, ${failed} failed`);
     process.exit(failed === 0 ? 0 : 1);
 })();

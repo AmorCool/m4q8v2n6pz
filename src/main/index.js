@@ -357,6 +357,23 @@ class Application extends EventEmitter {
             // ThunderPanPlugin asks for a peer id of its own; the sign-in one
             // is what the transport uses, so they are the same value.
             [F.GET_TP_PEER_ID]: fromPlugin(async () => this.getPeerId()),
+
+            /*
+             * Task mutations.
+             *
+             * The renderer arrives through the same transport as a plugin, so
+             * these carry the same two leading context arguments and are
+             * wrapped the same way. Nothing is projected on the way out: the
+             * kernel's task objects are plain data, and a copy would stop the
+             * renderer's own merging from lining up with the events, which
+             * carry the kernel's fields verbatim.
+             */
+            [F.CREATE_NEW_TASK]: fromPlugin(async (spec) => this.kernel.addTask(spec || {})),
+            [F.PAUSE_TASK]: fromPlugin(async (taskId) => this.kernel.pauseTask(taskId)),
+            [F.RESUME_TASK]: fromPlugin(async (taskId) => this.kernel.startTask(taskId)),
+            [F.DELETE_TASK]: fromPlugin(async (taskId) => this.kernel.removeTask(taskId)),
+            [F.GET_TASK_BASE_INFO]: fromPlugin(async (taskId) => this.kernel.getTask(taskId)),
+            [F.GET_ALL_TASK_BASE_INFO]: fromPlugin(async () => this.kernel.getAllTasks()),
         });
     }
 

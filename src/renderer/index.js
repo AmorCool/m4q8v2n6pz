@@ -317,10 +317,25 @@ async function mountQueuedViews() {
 // Wiring
 // ---------------------------------------------------------------------------
 
+/*
+ * Methods that are expected to return nothing.
+ *
+ * The transport answers an unregistered name with `[null, message]`, which
+ * unwraps to `null` -- so "no such method" and "the method returned nothing"
+ * arrive looking the same. Without this list every void operation would be
+ * reported as a missing feature, and with the check removed entirely a button
+ * backed by a method that does not exist would silently do nothing.
+ */
+const VOID_METHODS = new Set(["PauseTask", "ResumeTask", "DeleteTask"]);
+
 async function call(method, ...args) {
     const result = await bridge.rpc(method, ...args);
     if (!result || !result.ok) {
         showBanner(String((result && result.error) || "调用失败"));
+        return null;
+    }
+    if (!VOID_METHODS.has(method) && (result.value === null || result.value === undefined)) {
+        showBanner(`没有这个功能: ${method}`);
         return null;
     }
     return result.value;
@@ -354,7 +369,7 @@ function init() {
         if (!url) return;
         // The kernel decides whether this is a torrent, a magnet or a plain
         // URL, so the renderer does not guess and does not send a type.
-        await call("AddTask", { url });
+        await call("CreateNewTask", { url });
         input.value = "";
         updateToolbar();
     });
@@ -366,7 +381,7 @@ function init() {
         if (selected) await call("ResumeTask", selected);
     });
     document.getElementById("remove").addEventListener("click", async () => {
-        if (selected) await call("RemoveTask", selected);
+        if (selected) await call("DeleteTask", selected);
     });
 
     bridge.onNativeEvent(({ name, payload }) => handleEvent(name, payload));

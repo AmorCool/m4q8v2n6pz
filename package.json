@@ -3,13 +3,14 @@
     "version": "0.1.0",
     "description": "Thunder (Xunlei) desktop client rebuild",
     "private": true,
-    "main": "src/main/index.js",
+    "main": "src/main/electron-main.js",
     "scripts": {
-        "start": "cross-env TL_OUTPUT=console node src/main/index.js",
+        "start": "electron .",
+        "start:headless": "cross-env TL_OUTPUT=console node src/main/index.js",
         "test": "node scripts/smoke.js",
         "engine:fetch": "node scripts/fetch-engine.js",
         "engine:list": "node scripts/fetch-engine.js --list",
-        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/engine-aria2.js && node --check src/main/index.js && node --check scripts/fetch-engine.js"
+        "lint": "node --check src/main/contract.js && node --check src/main/rpc.js && node --check src/main/kernel.js && node --check src/main/login.js && node --check src/main/vip-token.js && node --check src/main/plugin-host.js && node --check src/main/engine-aria2.js && node --check src/main/index.js && node --check src/main/electron-main.js && node --check src/preload/index.js && node --check src/renderer/index.js && node --check scripts/fetch-engine.js"
     },
     "engines": {
         "node": ">=18"

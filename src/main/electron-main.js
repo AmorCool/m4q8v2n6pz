@@ -129,15 +129,28 @@ async function boot() {
         });
     }
 
-    // Renderer-initiated calls. The IPC channel is a transport, not a second
-    // API: the names it carries are the same ones the mesh already exposes, so
-    // nothing here has to be kept in step with the plugin contract by hand.
+    /*
+     * Renderer-initiated calls.
+     *
+     * The channel is a transport, not a second API: the names it carries are
+     * the ones the server functions are already registered under, so nothing
+     * here has to be kept in step with the plugin contract by hand.
+     *
+     * The two leading arguments are the plugin convention -- caller context and
+     * the callee's own context -- and every registered handler strips them.
+     * The renderer has no context object of its own, so a labelled placeholder
+     * stands in. Sending the arguments without them would silently shift every
+     * real argument by two, which is the kind of failure that looks like a
+     * wrong value rather than a wrong call.
+     */
     ipcMain.handle("rpc", async (_event, method, args) => {
-        if (typeof application.callServerFunction !== "function") {
-            return { ok: false, error: `no such method: ${method}` };
+        const mesh = application && application.mesh && application.mesh.main;
+        if (!mesh) {
+            return { ok: false, error: "not ready" };
         }
+        const context = { id: "renderer" };
         try {
-            const value = await application.callServerFunction("renderer", {}, method, ...args);
+            const value = await mesh.callServerFunction(method, context, context, ...args);
             return { ok: true, value };
         } catch (error) {
             return { ok: false, error: String((error && error.message) || error) };
